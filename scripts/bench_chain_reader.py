@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 import types
 import urllib.error
@@ -42,10 +43,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_DEFAULT = HERE.parent
+#: 官方基准仓与布局镜像的默认落点：**只在环境变量缺省时用**，且不含本机绝对路径
+#: （追踪面门禁 `scripts/check_local_paths.py` 禁止本机路径；两处均以运行期求值的
+#: 家目录/临时目录为根，源码里不出现机器前缀）。真实路径请用环境变量覆盖：
+#:   MEMBENCH_CHAIN_BENCH / ITERREADER_DIR
 BENCH_DEFAULT = Path(os.environ.get(
     "MEMBENCH_CHAIN_BENCH",
-    r"C:\Users\test\AppData\Local\Temp\bench_o5dje0c8\bench"))
-ART_DIR = Path(os.environ.get("ITERREADER_DIR", r"D:\4_ai\_team\iterreader"))
+    os.path.join(tempfile.gettempdir(), "bench")))
+ART_DIR = Path(os.environ.get(
+    "ITERREADER_DIR",
+    os.path.join(os.path.expanduser("~"), "_team", "iterreader")))
 STAGE_DEFAULT = ART_DIR / "stage"
 GEN_MODEL = "deepseek-flash"
 API_BASE = "https://api.deepseek.com"

@@ -33,9 +33,12 @@ for _p in (REPO, REPO / "scripts"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+#: 官方基准仓落点：**只在环境变量缺省时用**，且不含本机绝对路径
+#: （追踪面门禁 `scripts/check_local_paths.py` 禁止本机路径）。真实路径用
+#: 环境变量 `MEMBENCH_CHAIN_BENCH` 覆盖；缺省取运行期临时目录（下方有 SKIP 分支兜住）。
 BENCH = Path(os.environ.get(
     "MEMBENCH_CHAIN_BENCH",
-    r"C:\Users\test\AppData\Local\Temp\bench_o5dje0c8\bench"))
+    os.path.join(tempfile.gettempdir(), "bench")))
 SENTINEL = "sk-GUARD-SENTINEL-DO-NOT-LEAK-0123456789"
 KEYS_FP_EXPECTED = "bda3d94b7f29526a"
 
