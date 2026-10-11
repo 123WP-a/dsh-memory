@@ -17,6 +17,7 @@ ok/id/committed——「客户端据此判定『是否落盘』而非猜测」�
       python -X utf8 -m md_cg.test_write_return_shape --mutate
 '''
 import argparse
+import ast as _ast
 import io
 import json
 import os
@@ -144,24 +145,44 @@ def g_source_no_silent_gap():
 _GATE_REQ = protocol.WRITE_TRIO + ('moved_to', 'verdict', 'hint')
 
 
-def _scan_gate_missing(src):
-    '''找出闸门短路形态的返回里缺 gate_short_circuit 必需键的项。
+def _scan_gate_missing(src, markers=('moved_to', 'gate')):
+    '''按 protocol 形状表核对写面返回体（**AST 级**，避免内层字典 `}` 误切）。
 
-    形态识别（任一即视为短路返回）：字典内含 `moved_to` **或** `verdict`
-    ——后者是校验裁决标记，缺 verdict 的短路返回（本批修的正是这种）也由它覆盖；
-    纯 `committed=True` 的落盘形态不含二者，不受本扫描器约束。
+    `markers`：认定「本返回属闸门短路类」的键。默认 `moved_to`/`gate`（写链/引擎面）；
+    工具面额外加 `verdict`——因为那里最初的缺口正是**连 moved_to 都没有**的那一态。
+    形状判定（按返回字典键集）：
+      · 含 `gate`     ⇒ gate_gated：需 WRITE_TRIO + (gate, verdict)
+      · 含 `moved_to` ⇒ gate_short_circuit：需 WRITE_TRIO + (moved_to, verdict, hint)
+      · 其余          ⇒ 落盘形态：需 WRITE_TRIO
+    豁免：字面量之后补键的既有写法（如 `out["hint"] = ...`）视为满足（源码全文出现该赋值即豁免）。
     '''
     bad = []
-    lines = src.split(chr(10))
-    for n, l in enumerate(lines):
-        if 'return {' not in l:
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError as exc:
+        return ['源码解析失败：%s' % exc]
+    late = set()
+    for k in ('hint',):
+        if ('["%s"] = ' % k) in src or ("['%s'] = " % k) in src:
+            late.add(k)
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Return) or not isinstance(node.value, _ast.Dict):
             continue
-        head = chr(10).join(lines[n:n + 8]).split('}')[0]
-        if '"moved_to"' not in head and '"verdict"' not in head:
+        keys = set()
+        for k in node.value.keys:
+            if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                keys.add(k.value)
+        if not (set(markers) & keys):
             continue
-        miss = [k for k in _GATE_REQ if ('"%s"' % k) not in head]
+        if 'gate' in keys:
+            need, shape = protocol.WRITE_TRIO + ('gate', 'verdict'), 'gate_gated'
+        elif 'moved_to' in keys:
+            need, shape = _GATE_REQ, 'gate_short_circuit'
+        else:
+            need, shape = protocol.WRITE_TRIO, 'committed'
+        miss = [k for k in need if k not in keys and k not in late]
         if miss:
-            bad.append('第 %d 行缺 %s' % (n + 1, ','.join(miss)))
+            bad.append('第 %d 行 [%s] 缺 %s' % (node.lineno, shape, ','.join(miss)))
     return bad
 
 
@@ -200,14 +221,31 @@ def g_autonomy_gate_shape():
 
 
 def g_gate_source_no_gap():
+    '''写动词面三个文件的闸门短路返回，必须含对应形状的必需键。
+
+    面与标记（避免扫到非写面同名字段）：
+      · `mcp_server.py`：**只扫 `mdcg_remember` 工具面分支块**；标记含 `verdict`
+        ——该面最初的缺口正是「连 `moved_to` 都没有」的那一态。
+      · `writepipe.py` / `mdcos.py`：整文件按 `moved_to`/`gate` 标记（两文件均写面）。
+    '''
+    bad = []
     src = io.open(os.path.join(_HERE, 'mcp_server.py'), encoding='utf-8').read()
     i = src.find('if name == "mdcg_remember":')
     j = src.find('if name == "mdcg_recall":')
     block = src[i:j] if (i >= 0 and j > i) else ''
-    bad = _scan_gate_missing(block)
+    bad += ['mcp_server.py mdcg_remember 块 %s' % s
+            for s in _scan_gate_missing(block,
+                                        markers=('moved_to', 'gate', 'verdict'))]
+    for fn, marks in (('writepipe.py', ('moved_to', 'gate')),
+                      # mdcos 只按 moved_to 标记：其 `remember_gated` 的**内部返回形状**
+                      # （verdict/bypass/gate/written）契约属 #109 第③项「工具面是否受三键
+                      # 铁律约束」的**待裁范围**，本判据不替它裁（不误报、也不擅改）。
+                      ('mdcos.py', ('moved_to',))):
+        s = io.open(os.path.join(_HERE, fn), encoding='utf-8').read()
+        bad += ['%s %s' % (fn, x) for x in _scan_gate_missing(s, markers=marks)]
     ok(not bad,
-       'G7 工具面内「带 moved_to 的返回」均含 gate_short_circuit 必需键'
-       '（WRITE_TRIO+moved_to+verdict+hint；防缺键回退）', bad)
+       'G7 写动词面闸门短路返回均含对应形状的必需键（gate_short_circuit = WRITE_TRIO'
+       '+moved_to+verdict+hint；gate_gated = WRITE_TRIO+gate+verdict；防缺键回退）', bad)
 
 
 _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
@@ -267,7 +305,10 @@ def _run_mutations():
     print('')
     print('!! 定点变异自证：给 G7 判据体喂合成源码，判别力必须成立')
     for name, src, expect_red in _SYN_GATE:
-        got = _scan_gate_missing(src)
+        # AST 判据要求 return 处于函数体内 ⇒ 合成样本统一包一层 def
+        wrapped = 'def _f():' + chr(10) + chr(10).join(
+            '    ' + l for l in src.split(chr(10)))
+        got = _scan_gate_missing(wrapped, markers=('moved_to', 'gate', 'verdict'))
         good = (bool(got) == expect_red)
         if not good:
             bad += 1
