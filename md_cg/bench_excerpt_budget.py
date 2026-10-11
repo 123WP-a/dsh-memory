@@ -50,8 +50,10 @@ def worker(repo, workspace):
                                          for row in out["pack"]]})
         finally:
             cg.close()
-    return {"commit": subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip(),
-            "mdcos_git_blob": subprocess.check_output(["git", "-C", repo, "hash-object", "md_cg/mdcos.py"], text=True).strip(),
+    return {"commit": subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"],
+                                             text=True, encoding="utf-8", errors="replace").strip(),
+            "mdcos_git_blob": subprocess.check_output(["git", "-C", repo, "hash-object", "md_cg/mdcos.py"],
+                                                      text=True, encoding="utf-8", errors="replace").strip(),
             "excerpts": rows, "recalls": recalls}
 
 
