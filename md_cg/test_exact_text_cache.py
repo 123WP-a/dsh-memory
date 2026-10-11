@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import call, patch
 
-from . import mdcg, readcache
+from . import mdcg, nodefile, readcache
 from .mdcos import MdCGOS
 
 
@@ -95,8 +95,10 @@ class ExactTextCache(unittest.TestCase):
         expected = sum(len(getattr(cg, name, {})) for name in
                        ("_read_cache", "_norm_bigrams_cache", "_positive_body_cache"))
         self.assertTrue(cg._exact_text_cache)
+        self.assertTrue(cg._like_lower_cache)
         self.assertEqual(readcache.clear(cg), expected)
         self.assertFalse(cg._exact_text_cache)
+        self.assertFalse(cg._like_lower_cache)
         self.assertEqual(readcache.clear(cg), 0)
 
     def test_short_query_does_not_normalize_documents(self):
@@ -109,6 +111,7 @@ class ExactTextCache(unittest.TestCase):
         with patch.dict(os.environ, {"MDCG_READ_CACHE": "0"}):
             cg = self.make_store()
         self.assertFalse(hasattr(cg, "_exact_text_cache"))
+        self.assertFalse(hasattr(cg, "_like_lower_cache"))
         rows = self.score(cg, "ABC")
         self.assertEqual({node["id"]: node[mdcg.EXACT_HIT_KEY] for node, _ in rows},
                          {"a": 0, "z": 1, "case": 0})
@@ -127,6 +130,55 @@ class ExactTextCache(unittest.TestCase):
         readcache.install(cg)
         readcache.clear(cg)
         self.assertEqual(cg._doc_exact_text(entry, "D E F"), "DEF")
+        self.assertEqual(cg._like_body_lower(entry, "DIFFERENT"), "different")
+
+    def test_lowercase_projection_preserves_old_like_predicate(self):
+        cg = self.make_store({"same": "# 正文：İΣ Alpha 中文\n# 不适用条件：Forbidden"})
+        entry, fm, body = self.docs(cg)[0]
+        fm["tags"] = ["MixedTag"]
+        lower = nodefile.positive_body(body).lower()
+        for terms in ([], ["alpha"], ["Alpha"], ["i\u0307"], ["中文"],
+                      ["forbidden"], ["mixedtag"], ["absent"]):
+            with self.subTest(terms=terms):
+                expected = any(t in lower or t.lower() in "mixedtag" for t in terms)
+                self.assertEqual(cg._like(body, fm, terms), expected)
+                self.assertEqual(cg._like(body, fm, terms, entry=entry,
+                                         body_lower=cg._like_body_lower), expected)
+        self.assertTrue(cg._like(body, fm, [], index_keys={"hit": True},
+                                 body_lower=lambda *_: self.fail("index hit should return early")))
+
+    def test_lowercase_warm_reuse_and_single_write_invalidation(self):
+        cg = self.make_store({"a": "Alpha OLD", "b": "Alpha OTHER"})
+        cg.search_rrf("alpha", paths=("lexical",), judge=False, record=False)
+        before = dict(cg._like_lower_cache)
+        with patch.object(cg, "_positive_body", wraps=cg._positive_body) as project:
+            cg.search("alpha", judge=False, record=False)
+            self.assertEqual(project.call_count, 0)
+            cg.add("a", "Alpha NEW", layer="knowledge", importance=0.5)
+            cg.flush()
+            hits, _ = cg.search_rrf("alpha new", paths=("lexical",), judge=False, record=False)
+            self.assertEqual(project.call_count, 1)
+        self.assertIn("a", [hit[0]["id"] for hit in hits])
+        other = cg.index["nodes"]["b"]["path"]
+        self.assertIs(cg._like_lower_cache[other][1], before[other][1])
+        changed = cg.index["nodes"]["a"]["path"]
+        self.assertIn("new", cg._like_lower_cache[changed][1])
+        self.assertNotIn("old", cg._like_lower_cache[changed][1])
+
+    def test_rebuild_after_external_write_invalidates_both_projections(self):
+        cg = self.make_store({"same": "A B C Alpha"})
+        cg.search_rrf("alpha", paths=("lexical",), judge=False, record=False)
+        entry = cg.index["nodes"]["same"]
+        path = os.path.join(cg.root, entry["path"])
+        with open(path, encoding="utf-8") as stream:
+            original = stream.read()
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(original.replace("A B C Alpha", "D E F Beta"))
+        cg.rebuild_index()
+        hits, _ = cg.search_rrf("beta", paths=("lexical",), judge=False, record=False)
+        self.assertIn("same", [hit[0]["id"] for hit in hits])
+        self.assertIn("DEF", cg._doc_exact_text(entry, cg._read(entry)[1]))
+        self.assertNotIn("ABC", cg._doc_exact_text(entry, cg._read(entry)[1]))
 
 
 if __name__ == "__main__":

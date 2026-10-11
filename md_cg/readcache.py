@@ -236,6 +236,24 @@ def install(cg):
 
         cg._doc_exact_text = _cached_exact
         cg._exact_text_cache = exact_cache
+    lower_cache = {}
+    if hasattr(cg, "_like_body_lower"):
+        orig_lower = (getattr(cg, "_like_body_lower_uncached", None)
+                      or cg._like_body_lower)
+        cg._like_body_lower_uncached = orig_lower
+
+        def _cached_lower(entry, content):
+            p = entry["path"]
+            gen = getattr(cg._dirty, "write_gen", len(cg._dirty))
+            hit = lower_cache.get(p)
+            if hit is not None and _fresh(p, hit):
+                return hit[1]
+            val = orig_lower(entry, content)
+            lower_cache[p] = (gen, val)
+            return val
+
+        cg._like_body_lower = _cached_lower
+        cg._like_lower_cache = lower_cache
     return cache
 
 
@@ -250,9 +268,10 @@ def clear(cg) -> int:
     if candidate_index is not None:
         candidate_index.clear()
     # Preserve clear()'s established count of the original three cache types.
-    extra = getattr(cg, "_exact_text_cache", None)
-    if extra is not None:
-        extra.clear()
+    for attr in ("_exact_text_cache", "_like_lower_cache"):
+        extra = getattr(cg, attr, None)
+        if extra is not None:
+            extra.clear()
     for attr in ("_read_cache", "_norm_bigrams_cache", "_positive_body_cache"):
         c = getattr(cg, attr, None)
         if c:

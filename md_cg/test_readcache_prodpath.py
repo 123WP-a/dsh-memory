@@ -200,12 +200,16 @@ def main():
         # 判别力（不依赖 git 回退的常驻自证）。
         from md_cg.mdcg import MdCG as _MdCG
         _saved_pb = cg._positive_body
+        _saved_lower = cg._like_body_lower
         cg._positive_body = _MdCG.__dict__["_positive_body"].__get__(
+            cg, type(cg))
+        cg._like_body_lower = _MdCG.__dict__["_like_body_lower"].__get__(
             cg, type(cg))
         try:
             (_res8d, n_pb_uncached), = (count_pb(lambda: cg.search("蜂群调度")),)
         finally:
             cg._positive_body = _saved_pb
+            cg._like_body_lower = _saved_lower
         check("P8d 红基线自证：未缓存实现下同查询调用计数 >0",
               n_pb_uncached > 0, f"calls={n_pb_uncached}")
         check("P8e 恢复缓存版后再次零重调",

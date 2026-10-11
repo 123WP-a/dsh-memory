@@ -3549,6 +3549,10 @@ class MdCG:
         """
         return nodefile.positive_body(content)
 
+    def _like_body_lower(self, entry, content):
+        """Lowercase positive body; readcache reuses this pure projection."""
+        return self._positive_body(entry, content).lower()
+
     def _doc_exact_text(self, entry, content):
         """Whitespace-free full content for the existing exact-hit tie break.
 
@@ -4007,7 +4011,8 @@ class MdCG:
                         if self._like(d[2], d[1], terms,
                                       index_key_hits(d[0], terms, q),
                                       entry=d[0],
-                                      positive_body=self._positive_body)
+                                      positive_body=self._positive_body,
+                                      body_lower=self._like_body_lower)
                         or (semantic_on() and d[1].get("semantic"))]
                 out = try_stage(hits, TIER_BUCKET_LIKE)
                 if out:
@@ -4036,7 +4041,8 @@ class MdCG:
                       if self._like(d[2], d[1], terms,
                                     index_key_hits(d[0], terms, q),
                                     entry=d[0],
-                                    positive_body=self._positive_body)
+                                    positive_body=self._positive_body,
+                                    body_lower=self._like_body_lower)
                       or (semantic_on() and d[1].get("semantic"))
                       or d[0].get("path") in _dif]     # 图扩散补召回：无词面命中也放行进打分
             stat["pre_cap"] = len(hits_r)     # 与 T2 同序：截断**前**的候选数
@@ -4141,7 +4147,8 @@ class MdCG:
                 if self._like(d[2], d[1], terms,
                               index_key_hits(d[0], terms, q),
                               entry=d[0],
-                              positive_body=self._positive_body)
+                              positive_body=self._positive_body,
+                              body_lower=self._like_body_lower)
                 or (semantic_on() and d[1].get("semantic"))]
         # ---- S3 图扩散激活（契约 §3 S3；flag 控，默认关）----
         # 为何：审计偏差 1 曾成立——「edges 一直只被写入、检索从不使用」。**该偏差
@@ -4289,7 +4296,8 @@ class MdCG:
 
     @staticmethod
 # 生效条件：terms 为空时返回 False；否则任一 t 在 body 的小写串中出现（body 取自 positive_body 钩子——透传绑定方法时走 readcache 缓存版，未传时回落 nodefile.positive_body(content) 直调，两者同值），或该 t 的小写形式出现在 fm 的 tags（tags 取自 fm.get("tags") or []，缺键或假值按空列表拼接）小写串中，或 index_keys 为真值（六要素后两行的索引键命中，见 index_key_hits）即返回 True。
-    def _like(content, fm, terms, index_keys=None, entry=None, positive_body=None):
+    def _like(content, fm, terms, index_keys=None, entry=None, positive_body=None,
+              body_lower=None):
         # 负条件行（`# 不适用条件：`）是反例声明，不作召回键：命中它只应由
         # judge_qualification 走 REJECT，不能把节点召回。tags 仍参与匹配。
         #
@@ -4308,12 +4316,12 @@ class MdCG:
         if index_keys and index_keys.get("hit"):
             return True
         tags = " ".join(str(t) for t in (fm.get("tags") or []))
-        if positive_body is not None:
-            body = positive_body(entry, content)
+        if body_lower is not None:
+            body_l = body_lower(entry, content)
         else:
-            body = nodefile.positive_body(content)
-        # 双边小写化：英文大小写统一（中文无大小写不受影响）
-        body_l = body.lower()
+            body = (positive_body(entry, content) if positive_body is not None
+                    else nodefile.positive_body(content))
+            body_l = body.lower()
         tags_l = tags.lower()
         return any(t in body_l or t.lower() in tags_l for t in terms)
 

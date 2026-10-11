@@ -1087,7 +1087,8 @@ class MdCGOS(MdCG):
                         if self._like(d[2], d[1], terms,
                                       index_key_hits(d[0], terms, q),
                                       entry=d[0],
-                                      positive_body=self._positive_body)
+                                      positive_body=self._positive_body,
+                                      body_lower=self._like_body_lower)
                         or (semantic_on() and d[1].get("semantic"))]
                 out = try_stage(hits, TIER_BUCKET_LIKE)
                 if out:
@@ -1116,7 +1117,8 @@ class MdCGOS(MdCG):
                       if self._like(d[2], d[1], terms,
                                     index_key_hits(d[0], terms, q),
                                     entry=d[0],
-                                    positive_body=self._positive_body)
+                                    positive_body=self._positive_body,
+                                    body_lower=self._like_body_lower)
                       or (semantic_on() and d[1].get("semantic"))
                       or d[0].get("path") in _dif]     # 图扩散补召回：无词面命中也放行进打分
             stat["pre_cap"] = len(hits_r)     # 与 T2 同序：截断**前**的候选数
@@ -1152,7 +1154,8 @@ class MdCGOS(MdCG):
                 if self._like(d[2], d[1], terms,
                               index_key_hits(d[0], terms, q),
                               entry=d[0],
-                              positive_body=self._positive_body)
+                              positive_body=self._positive_body,
+                              body_lower=self._like_body_lower)
                 or (semantic_on() and d[1].get("semantic"))]
         stat["pre_cap"] = len(hits)
         stat["cap"] = GLOBAL_CAP
@@ -1206,7 +1209,8 @@ class MdCGOS(MdCG):
                 if self._like(d[2], d[1], terms,
                               index_key_hits(d[0], terms, query),
                               entry=d[0],
-                              positive_body=self._positive_body)
+                              positive_body=self._positive_body,
+                              body_lower=self._like_body_lower)
                 or (semantic_on() and d[1].get("semantic"))]
         if not hits:
             if entries is not full_entries:
