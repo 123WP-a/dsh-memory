@@ -352,8 +352,14 @@ class BM25Tests(unittest.TestCase):
             cg.add("public", "publicword", sensitivity="public")
             opts = dict(paths=("bm25",), judge=False, record=False)
             self.assertTrue(cg.search_rrf("privateword", **opts)[0])
+            # A later read check may still reject a stale private candidate.
+            # Check eligibility itself before scoring, so that secondary check
+            # cannot hide a missing identity key or contaminated BM25 statistics.
+            paths = {nid: cg.index["nodes"][nid]["path"] for nid in ("private", "public")}
+            self.assertEqual({e["path"] for e in bm25.candidate_pool(cg)}, set(paths.values()))
             cg.principal.can_admin = False
             cg.principal.session = "B"
+            self.assertEqual({e["path"] for e in bm25.candidate_pool(cg)}, {paths["public"]})
             self.assertEqual(cg.search_rrf("privateword", **opts)[0], [])
             cg.principal.clearance = "public"
             self.assertTrue(cg.search_rrf("publicword", **opts)[0])
