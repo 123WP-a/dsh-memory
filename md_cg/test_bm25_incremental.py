@@ -94,8 +94,8 @@ class IncrementalBlockTests(unittest.TestCase):
             self.raw("common second")
             idx = self.cg._bm25_index
             original_slots = len(idx.block_paths)
-            removed = {self.cg.index["nodes"][nid]["path"]
-                       for nid in ("local0005", "local0400")}
+            removed = set(self.cg.index["nodes"][nid]["path"]
+                          for nid in ("local0005", "local0400"))
             removed_slots = [idx.ordinals[path] for path in removed]
             entries = [e for e in self.cg._candidates() if e["path"] not in removed]
             actual, info = self.raw("common second", entries)
