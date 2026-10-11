@@ -140,8 +140,78 @@ def g_source_no_silent_gap():
        'G5b 工具面分支内不存在「ok:True 却不给 committed」的返回（防静默回退）', bad)
 
 
+#: protocol.gate_short_circuit（任一 before 闸门短路）的必需键集——本批补齐的判据面。
+_GATE_REQ = protocol.WRITE_TRIO + ('moved_to', 'verdict', 'hint')
+
+
+def _scan_gate_missing(src):
+    '''找出闸门短路形态的返回里缺 gate_short_circuit 必需键的项。
+
+    形态识别（任一即视为短路返回）：字典内含 `moved_to` **或** `verdict`
+    ——后者是校验裁决标记，缺 verdict 的短路返回（本批修的正是这种）也由它覆盖；
+    纯 `committed=True` 的落盘形态不含二者，不受本扫描器约束。
+    '''
+    bad = []
+    lines = src.split(chr(10))
+    for n, l in enumerate(lines):
+        if 'return {' not in l:
+            continue
+        head = chr(10).join(lines[n:n + 8]).split('}')[0]
+        if '"moved_to"' not in head and '"verdict"' not in head:
+            continue
+        miss = [k for k in _GATE_REQ if ('"%s"' % k) not in head]
+        if miss:
+            bad.append('第 %d 行缺 %s' % (n + 1, ','.join(miss)))
+    return bad
+
+
+def g_autonomy_gate_shape():
+    '''自治档位短路的两条分支（出单 / 兜底拒绝）须满足 gate_short_circuit 形状。
+
+    背景（#109 三处仍开着之二）：工具面 `mdcg_remember` 的自治档位分支此前**缺 verdict**，
+    不满足 protocol 声明的形状；直写面无校验闸 ⇒ verdict 键必在、值取 None（照
+    writepipe.py:758 既有惯例，不编造裁决）。
+    '''
+    from . import autonomy_modes as _am
+    env_mode = _am.AUTONOMY_ENV_KEYS['mode']
+    cg = _lib('autgate')
+    tool_write(cg, BODY % '初版', 'g1')            # 先造既有节点（触发 C 改写）
+    old = os.environ.get(env_mode)
+    try:
+        os.environ[env_mode] = 'confirm'           # 变更确认档 ⇒ 出单
+        o = tool_write(cg, BODY % '改写版', 'g1')
+        miss = [k for k in _GATE_REQ if k not in o]
+        ok(not miss and o.get('committed') is False
+           and o.get('moved_to') == 'review_queue' and o.get('verdict', '缺键') is None,
+           'G6a 自治出单分支满足 gate_short_circuit（含 verdict 键且为 None、committed=False）',
+           (miss, o.get('committed'), o.get('verdict', '缺键')))
+        os.environ[env_mode] = 'plan'              # 计划档 ⇒ **A 新增** fail-closed
+        o2 = tool_write(cg, BODY % '计划外新增', 'g2')   # 新 id ⇒ A 新增（非改写）
+        miss2 = [k for k in _GATE_REQ if k not in o2]
+        ok(not miss2 and o2.get('committed') is False
+           and o2.get('moved_to') == 'autonomy_forbidden',
+           'G6b 自治兜底拒绝分支（plan 档 A 新增）同样满足该形状（含 verdict 键、committed=False）',
+           (miss2, o2.get('moved_to')))
+    finally:
+        if old is None:
+            os.environ.pop(env_mode, None)
+        else:
+            os.environ[env_mode] = old
+
+
+def g_gate_source_no_gap():
+    src = io.open(os.path.join(_HERE, 'mcp_server.py'), encoding='utf-8').read()
+    i = src.find('if name == "mdcg_remember":')
+    j = src.find('if name == "mdcg_recall":')
+    block = src[i:j] if (i >= 0 and j > i) else ''
+    bad = _scan_gate_missing(block)
+    ok(not bad,
+       'G7 工具面内「带 moved_to 的返回」均含 gate_short_circuit 必需键'
+       '（WRITE_TRIO+moved_to+verdict+hint；防缺键回退）', bad)
+
+
 _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
-          g_source_no_silent_gap)
+          g_source_no_silent_gap, g_autonomy_gate_shape, g_gate_source_no_gap)
 
 
 def _run_all():
@@ -167,11 +237,37 @@ _SYN = (
 )
 
 
+#: 本批（gate_short_circuit 形状）的合成变异：喂 `_scan_gate_missing`，判别力必须成立。
+_SYN_GATE = (
+    ('M4 合成合规（三键 + moved_to + verdict + hint）',
+     'return {"ok": False, "id": nid, "committed": False,'
+     ' "moved_to": "conflict_deferred", "verdict": "DEFER", "hint": "x"}', False),
+    ('M5 合成缺 verdict（本批修掉的那一态）',
+     'return {"ok": True, "id": nid, "committed": False,'
+     ' "moved_to": "review_queue", "hint": "x"}', True),
+    ('M6 合成缺 hint（形状要求的下一步说明）',
+     'return {"ok": False, "id": nid, "committed": False,'
+     ' "moved_to": "x", "verdict": None}', True),
+    ('M7 合成缺 committed（原冲突 DEFER 分支那一态）',
+     'return {"ok": False, "id": nid, "verdict": "DEFER", "reason": "r"}', True),
+)
+
+
 def _run_mutations():
     print('!! 定点变异自证：给 G5b 判据体喂合成源码，判别力必须成立')
     bad = 0
     for name, src, expect_red in _SYN:
         got = _scan_ok_without_committed(src)
+        good = (bool(got) == expect_red)
+        if not good:
+            bad += 1
+        print('  %s %s' % ('PASS' if good else 'FAIL', name))
+        if not good:
+            print('        预期有红=%s 实际=%s' % (expect_red, got))
+    print('')
+    print('!! 定点变异自证：给 G7 判据体喂合成源码，判别力必须成立')
+    for name, src, expect_red in _SYN_GATE:
+        got = _scan_gate_missing(src)
         good = (bool(got) == expect_red)
         if not good:
             bad += 1

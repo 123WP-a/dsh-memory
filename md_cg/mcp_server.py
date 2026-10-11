@@ -3648,9 +3648,12 @@ def _dispatch(cg, name, args):
                     "action_name": _dec["action_name"],
                     "decision": _dec["decision"]}
             if _dec["decision"] == _am.FORBID:
+                # 同属 gate_short_circuit 形态（兜底拒绝分支）：补 verdict 键，
+                # 与出单分支同口径——直写面无校验闸，故取 None（不编造裁决）。
                 return {"ok": False, "id": nid, "committed": False,
                         "moved_to": "autonomy_forbidden",
                         "error": "autonomy_forbid", "autonomy": _aut,
+                        "verdict": None,
                         "hint": _dec["hint"]}
             _meta = {k: a[k] for k in
                      ("tags", "condition_space", "verification_basis",
@@ -3675,8 +3678,15 @@ def _dispatch(cg, name, args):
                                        layer=_layer,
                                        sensitivity=a.get("sensitivity"),
                                        info=True)
+            # 自治档位出单属 protocol.gate_short_circuit 形态：协议要求
+            # WRITE_TRIO + moved_to + verdict + hint——本分支此前缺 verdict
+            # （#109 同族缺口：工具面返回体不满足协议形状）。
+            # 直写面**不跑校验闸**（audit 在 gated 分支的链上），故本路径无校验裁决；
+            # 照 writepipe.py:758 的既有惯例透出 None：键必在场，值表明「本路径无裁决」
+            # （不编造 state，避免客户端把自造裁决当校验结论）。
             return {"ok": True, "id": nid, "committed": False,
-                    "moved_to": "review_queue", "pid": _pr["pid"],
+                    "moved_to": "review_queue", "verdict": None,
+                    "pid": _pr["pid"],
                     "mutation": _pay, "autonomy": _aut,
                     "hint": "%s 本次未落盘：变更单已入审核队列（pid=%s，目标 %s）。"
                             % (_dec["hint"], _pr["pid"], nid)}
@@ -3698,8 +3708,20 @@ def _dispatch(cg, name, args):
                          derived_from=_split_ids(a.get("derived_from")),
                          relation=a.get("relation"))
         if written is None:
-            return {"ok": False, "id": nid, "verdict": "DEFER",
-                    "reason": "节点间冲突检测未通过（on_conflict=defer）"}
+            # 冲突 DEFER 同属 protocol.gate_short_circuit 形态：协议要求
+            # WRITE_TRIO + moved_to + verdict + hint。此前只有 ok/id/verdict/reason
+            # ⇒ 判 committed 的调用方读不到「未提交」，也读不到去向与下一步。
+            # 语义（mdcg.py:2192 生效条件 + :2319-2321）：on_conflict=defer 时
+            # REJECT/BLINDSPOT **既不落盘也不入队**——故去向**不可**写 review_queue，
+            # 用 conflict_deferred 表达「被冲突闸挡下、未进任何队列」。
+            # （去向词表：维护者在 #109 记「未定」；本词为**建议值**，待维护者裁定后归一。）
+            return {"ok": False, "id": nid, "committed": False,
+                    "moved_to": "conflict_deferred",
+                    "verdict": "DEFER",
+                    "reason": "节点间冲突检测未通过（on_conflict=defer）",
+                    "hint": "本次未落盘、未入队（defer 语义）：如需落盘请显式处置冲突——"
+                            "修正正文后重写 / on_conflict=reject 取明确拒绝 / "
+                            "override=true 覆写（需相应权限）"}
         # issue #109 相邻面：工具面**同一返回体**在闸门短路分支给 committed=False，
         # 成功分支此前却不给 committed ⇒ 判 committed 的调用方会把「成功」读成
         # 「未提交」（与 #109 报的「把待审读成已提交」是同一处的两面）。
