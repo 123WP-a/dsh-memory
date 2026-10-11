@@ -127,10 +127,16 @@ class ExactTextCache(unittest.TestCase):
         cg = self.make_store()
         entry = next(iter(cg.index["nodes"].values()))
         cg._doc_exact_text(entry, "A B C")
+        cg._like_body_lower(entry, "A B C")
+        cg._doc_norm_bigrams(entry, "A B C")
         readcache.install(cg)
         readcache.clear(cg)
         self.assertEqual(cg._doc_exact_text(entry, "D E F"), "DEF")
         self.assertEqual(cg._like_body_lower(entry, "DIFFERENT"), "different")
+        readcache.clear(cg)
+        self.assertEqual(cg._positive_body(entry, "NEW BODY"), "NEW BODY")
+        self.assertEqual(cg._doc_norm_bigrams(entry, "NEW BODY"),
+                         mdcg.bigrams(mdcg.normalize_en("NEW BODY")))
 
     def test_lowercase_projection_preserves_old_like_predicate(self):
         cg = self.make_store({"same": "# 正文：İΣ Alpha 中文\n# 不适用条件：Forbidden"})

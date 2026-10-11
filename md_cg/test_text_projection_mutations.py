@@ -43,6 +43,16 @@ def install_mutation(kind):
     return patch.object(readcache, "install", wrapped)
 
 
+def hidden_nested_cache():
+    original = readcache.install
+    def wrapped(cg):
+        for attr in ("_positive_body_uncached", "_doc_norm_bigrams_uncached"):
+            if hasattr(cg, attr):
+                delattr(cg, attr)
+        return original(cg)
+    return patch.object(readcache, "install", wrapped)
+
+
 def missing_clear():
     original = readcache.clear
     def wrapped(cg):
@@ -64,6 +74,7 @@ def main(output):
         ("stale_exact", "test_one_write_invalidates_only_changed_document", lambda: install_mutation("stale_exact")),
         ("stale_lower", "test_lowercase_warm_reuse_and_single_write_invalidation", lambda: install_mutation("stale_lower")),
         ("missing_clear", "test_clear_removes_projection_without_changing_legacy_count", missing_clear),
+        ("hidden_nested_cache", "test_reinstall_does_not_keep_hidden_projection_cache", hidden_nested_cache),
     ]
     names = list(dict.fromkeys(test for _, test, _ in cases))
     evidence = {"baseline": run(names), "mutations": []}

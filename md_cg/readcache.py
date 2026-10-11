@@ -177,7 +177,9 @@ def install(cg):
 
     nb_cache = {}
     if hasattr(cg, "_doc_norm_bigrams"):
-        orig_nb = cg._doc_norm_bigrams
+        orig_nb = (getattr(cg, "_doc_norm_bigrams_uncached", None)
+                   or cg._doc_norm_bigrams)
+        cg._doc_norm_bigrams_uncached = orig_nb
 
         def _cached_nb(entry, c):
             p = entry["path"]
@@ -200,7 +202,9 @@ def install(cg):
     # 性质的纯函数（只依赖 content），缓存不对称在此收口。
     pb_cache = {}
     if hasattr(cg, "_positive_body"):
-        orig_pb = cg._positive_body
+        orig_pb = (getattr(cg, "_positive_body_uncached", None)
+                   or cg._positive_body)
+        cg._positive_body_uncached = orig_pb
 
         def _cached_pb(entry, content):
             p = entry["path"]
