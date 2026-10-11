@@ -166,6 +166,8 @@ def replay(args):
                     result = {arm: clients[arm].ask(req) for arm in order}
                     if len({r["signature"] for r in result.values()}) != 1:
                         raise AssertionError(f"result mismatch: {case} {phase} {req} {result}")
+                    if phase == "after_write" and any("doc0001" not in r["ids"] for r in result.values()):
+                        raise AssertionError("written fresh marker was not retrieved")
                     runs.append({"phase": phase, "request": req, "order": order, "arms": result})
                 pair({"op": "rrf", "q": queries[0]}, 0, "cold")
                 # Warm every query and both public entry points in every arm.
