@@ -3707,7 +3707,12 @@ def _dispatch(cg, name, args):
         if written is None:
             return {"ok": False, "id": nid, "verdict": "DEFER",
                     "reason": "节点间冲突检测未通过（on_conflict=defer）"}
-        out = {"ok": True, "id": nid}
+        # issue #109 相邻面：工具面**同一返回体**在闸门短路分支给 committed=False，
+        # 成功分支此前却不给 committed ⇒ 判 committed 的调用方会把「成功」读成
+        # 「未提交」（与 #109 报的「把待审读成已提交」是同一处的两面）。
+        # 三键铁律（protocol.WRITE_TRIO / 协议文档 :28「任一形态必含 ok/id/committed」）
+        # 在此补齐：不改写入语义，只补判据键。
+        out = {"ok": True, "id": nid, "committed": True}
         if _prior is not None:
             out["overwrite_of"] = _prior
             out["overwrite_ratio"] = _prior_cov
