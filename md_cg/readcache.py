@@ -177,7 +177,9 @@ def install(cg):
 
     nb_cache = {}
     if hasattr(cg, "_doc_norm_bigrams"):
-        orig_nb = cg._doc_norm_bigrams
+        orig_nb = (getattr(cg, "_doc_norm_bigrams_uncached", None)
+                   or cg._doc_norm_bigrams)
+        cg._doc_norm_bigrams_uncached = orig_nb
 
         def _cached_nb(entry, c):
             p = entry["path"]
@@ -200,7 +202,9 @@ def install(cg):
     # 性质的纯函数（只依赖 content），缓存不对称在此收口。
     pb_cache = {}
     if hasattr(cg, "_positive_body"):
-        orig_pb = cg._positive_body
+        orig_pb = (getattr(cg, "_positive_body_uncached", None)
+                   or cg._positive_body)
+        cg._positive_body_uncached = orig_pb
 
         def _cached_pb(entry, content):
             p = entry["path"]
@@ -214,6 +218,46 @@ def install(cg):
 
         cg._positive_body = _cached_pb
         cg._positive_body_cache = pb_cache
+
+    # Exact-hit scoring used to remove whitespace from every full document on
+    # every query. Reuse the pure document projection with the same path and
+    # dirty-generation validity as the other derived text caches.
+    exact_cache = {}
+    if hasattr(cg, "_doc_exact_text"):
+        orig_exact = (getattr(cg, "_doc_exact_text_uncached", None)
+                      or cg._doc_exact_text)
+        cg._doc_exact_text_uncached = orig_exact
+
+        def _cached_exact(entry, content):
+            p = entry["path"]
+            gen = getattr(cg._dirty, "write_gen", len(cg._dirty))
+            hit = exact_cache.get(p)
+            if hit is not None and _fresh(p, hit):
+                return hit[1]
+            val = orig_exact(entry, content)
+            exact_cache[p] = (gen, val)
+            return val
+
+        cg._doc_exact_text = _cached_exact
+        cg._exact_text_cache = exact_cache
+    lower_cache = {}
+    if hasattr(cg, "_like_body_lower"):
+        orig_lower = (getattr(cg, "_like_body_lower_uncached", None)
+                      or cg._like_body_lower)
+        cg._like_body_lower_uncached = orig_lower
+
+        def _cached_lower(entry, content):
+            p = entry["path"]
+            gen = getattr(cg._dirty, "write_gen", len(cg._dirty))
+            hit = lower_cache.get(p)
+            if hit is not None and _fresh(p, hit):
+                return hit[1]
+            val = orig_lower(entry, content)
+            lower_cache[p] = (gen, val)
+            return val
+
+        cg._like_body_lower = _cached_lower
+        cg._like_lower_cache = lower_cache
     return cache
 
 
@@ -227,6 +271,11 @@ def clear(cg) -> int:
     candidate_index = getattr(cg, "_rrf_candidate_index", None)
     if candidate_index is not None:
         candidate_index.clear()
+    # Preserve clear()'s established count of the original three cache types.
+    for attr in ("_exact_text_cache", "_like_lower_cache"):
+        extra = getattr(cg, attr, None)
+        if extra is not None:
+            extra.clear()
     for attr in ("_read_cache", "_norm_bigrams_cache", "_positive_body_cache"):
         c = getattr(cg, attr, None)
         if c:
