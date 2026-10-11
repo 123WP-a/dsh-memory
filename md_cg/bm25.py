@@ -24,6 +24,7 @@ LIMIT = 50
 BLOCK_SIZE = 128
 BLOCK_THRESHOLD = 4096
 BLOCK_CACHE_TERMS = 32
+BLOCK_UPDATE_LIMIT = 4096
 BLOCK_SAMPLE = 256
 BLOCK_PAIR_LIMIT = 32
 STREAM_THRESHOLD = 32768
@@ -167,6 +168,9 @@ class BM25Index:
         self.rank_version = -1
         self.block_paths = self.ordinals = self.block_best = None
         self.term_blocks = OrderedDict()
+        self.block_updates = {}
+        self.block_dirty = {}
+        self.block_holes = 0
         self.block_policy = OrderedDict()
         self.policy_version = -1
         self.entries = self.allowed = self.write_gen = None
@@ -175,6 +179,7 @@ class BM25Index:
         old = self.docs.pop(path, None)
         if old is None:
             return
+        self._note_block_update(path, old[1], removed=True)
         self.total_length -= old[2]
         self.version += 1
         for term in old[1]:
@@ -183,6 +188,35 @@ class BM25Index:
             if not posting:
                 del self.post[term]
                 del self.terms[term]
+                self.term_blocks.pop(term, None)
+                self.block_dirty.pop(term, None)
+
+    def _reset_blocks(self):
+        """Discard only derived bounds/layout, retaining current TF statistics."""
+        self.block_paths = self.ordinals = self.block_best = None
+        self.rank_version = -1
+        self.term_blocks.clear()
+        self.block_updates.clear()
+        self.block_dirty.clear()
+        self.block_holes = 0
+
+    def _blocks_need_compaction(self, extra=0):
+        return (self.block_paths is not None and len(self.block_paths) + extra
+                > max(2 * BLOCK_SIZE, 2 * len(self.docs)))
+
+    def _note_block_update(self, path, terms, removed=False):
+        if self.ordinals is None:
+            return
+        # Keep only cached term names, so repeated edits cannot accumulate an
+        # unbounded history of removed words. Large batches rebuild on demand.
+        if path not in self.block_updates and len(self.block_updates) >= BLOCK_UPDATE_LIMIT:
+            self._reset_blocks()
+            return
+        old_terms, new_terms = self.block_updates.setdefault(path, [set(), set()])
+        target = old_terms if removed else new_terms
+        if not removed:
+            target.clear()
+        target.update(term for term in terms if term in self.term_blocks)
 
     def sync(self, cg, entries, report):
         dirty = getattr(cg, "_dirty", None)
@@ -244,9 +278,16 @@ class BM25Index:
             self.docs[path] = (getattr(dirty, "write_gen", 0), tuple(doc_terms), length,
                                float(fm.get("importance") or 0),
                                str(fm.get("id") or path))
+            self._note_block_update(path, doc_terms)
             self.total_length += length
             self.version += 1
         self.initialized = True
+        if not self.docs:
+            self._reset_blocks()
+        elif self._blocks_need_compaction():
+            # An exhaustive/absent query may never prepare blocks again after
+            # a scope shrink. Drop its oversized layout immediately as well.
+            self._reset_blocks()
         self.entries, self.allowed = entries, allowed
         self.write_gen = getattr(dirty, "write_gen", None)
         report["documents"] = len(self.docs)
@@ -258,8 +299,8 @@ class BM25Index:
             for term in frequent:
                 posting = self.post[term]
                 if self._block_worthwhile(posting, term):
-                    self._prepare_block_paths()
-                    self._blocks(posting, term)
+                    self._prepare_block_paths(report)
+                    self._blocks(posting, term, report)
             report["block_terms_prepared"] = len(self.term_blocks)
             report["block_preparation_ms"] = (time.perf_counter() - started) * 1000
         return allowed
@@ -307,11 +348,29 @@ class BM25Index:
         self.block_policy.move_to_end(term)
         return self.block_policy[term]
 
-    def _blocks(self, posting, term):
+    def _blocks(self, posting, term, report=None):
         cached = self.term_blocks.get(term)
         if cached is not None:
+            for block in self.block_dirty.pop(term, ()):
+                start = block * BLOCK_SIZE
+                paths = self.block_paths[start:start + BLOCK_SIZE]
+                bitmap, pairs = 0, set()
+                for bit, path in enumerate(paths):
+                    tf = posting.get(path) if path is not None else None
+                    if tf is not None:
+                        bitmap |= 1 << bit
+                        pairs.add((tf, self.docs[path][2]))
+                if bitmap:
+                    cached[block] = (bitmap, tuple(pairs))
+                else:
+                    cached.pop(block, None)
+                if report is not None:
+                    report["block_repaired_blocks"] += 1
+                    report["block_update_slots"] += len(paths)
             self.term_blocks.move_to_end(term)
             return cached
+        if report is not None:
+            report["block_rebuild_postings"] += len(posting)
         blocks = {}
         for path, tf in posting.items():
             slot = self.ordinals[path]
@@ -323,18 +382,67 @@ class BM25Index:
         if len(posting) >= BLOCK_THRESHOLD:
             self.term_blocks[term] = blocks
             while len(self.term_blocks) > BLOCK_CACHE_TERMS:
-                self.term_blocks.popitem(last=False)
+                evicted, _ = self.term_blocks.popitem(last=False)
+                self.block_dirty.pop(evicted, None)
         return blocks
 
-    def _prepare_block_paths(self):
-        if self.rank_version != self.version:
+    def _prepare_block_paths(self, report=None):
+        if self.rank_version == self.version:
+            return
+        # Unchanged documents keep their slots. Changed/new documents append
+        # together, rather than scattering new TF/length outliers across old
+        # blocks and loosening many bounds. Compact this delta tail when its
+        # holes would exceed half the layout; bulk changes rebuild on demand.
+        rebuild = (self.ordinals is None or not self.block_updates
+                   or self._blocks_need_compaction(sum(p in self.docs for p in self.block_updates)))
+        if rebuild:
             self.block_paths = list(self.docs)
             self.ordinals = {path: i for i, path in enumerate(self.block_paths)}
             self.block_best = [min((-self.docs[p][3], self.docs[p][4])
                                    for p in self.block_paths[i:i + BLOCK_SIZE])
                                for i in range(0, len(self.block_paths), BLOCK_SIZE)]
             self.term_blocks.clear()
-            self.rank_version = self.version
+            self.block_dirty.clear()
+            self.block_holes = 0
+            if report is not None:
+                report["block_layout_rebuilt"] = True
+        else:
+            touched = set()
+
+            def mark(slot, terms):
+                block = slot // BLOCK_SIZE
+                touched.add(block)
+                for term in terms:
+                    if term in self.term_blocks:
+                        self.block_dirty.setdefault(term, set()).add(block)
+
+            # Tombstone old slots, then group replacements in the delta tail.
+            # Old and new cached terms both invalidate their affected blocks.
+            for path, (old_terms, _new_terms) in self.block_updates.items():
+                if path in self.ordinals:
+                    slot = self.ordinals.pop(path)
+                    self.block_paths[slot] = None
+                    self.block_holes += 1
+                    mark(slot, old_terms)
+            for path, (_old_terms, new_terms) in self.block_updates.items():
+                if path not in self.docs:
+                    continue
+                slot = len(self.block_paths)
+                self.block_paths.append(path)
+                self.ordinals[path] = slot
+                mark(slot, new_terms)
+            for block in sorted(touched):
+                best = min(((-self.docs[p][3], self.docs[p][4])
+                            for p in self.block_paths[block * BLOCK_SIZE:(block + 1) * BLOCK_SIZE]
+                            if p is not None), default=(math.inf, ""))
+                if block == len(self.block_best):
+                    self.block_best.append(best)
+                else:
+                    self.block_best[block] = best
+            if report is not None:
+                report["block_layout_touched"] += len(touched)
+        self.block_updates.clear()
+        self.rank_version = self.version
 
     def _rank_blocks(self, terms, avg_length, report):
         """Exact top 50 with per-block score bounds and deterministic ties.
@@ -344,10 +452,10 @@ class BM25Index:
         a maximum, then summing in query-term order, cannot understate any
         document's computed score. Bitmaps count all matches, even pruned ones.
         """
-        self._prepare_block_paths()
+        self._prepare_block_paths(report)
         bounds, matches = defaultdict(float), defaultdict(int)
         for posting, idf, term in terms:
-            for block, (bitmap, pairs) in self._blocks(posting, term).items():
+            for block, (bitmap, pairs) in self._blocks(posting, term, report).items():
                 bounds[block] += max(idf * tf * (K1 + 1.0) /
                     (tf + K1 * (1.0 - B + B * length / avg_length))
                     for tf, length in pairs)
@@ -382,7 +490,9 @@ class BM25Index:
 def search(cg, query, entries, stat):
     report = {"k1": K1, "b": B, "limit": LIMIT, "input": len(entries),
               "build_reads": 0, "update_reads": 0, "unavailable": 0,
-              "posting_visits": 0, "matched": 0}
+              "posting_visits": 0, "matched": 0, "block_layout_rebuilt": False,
+              "block_layout_touched": 0, "block_repaired_blocks": 0,
+              "block_update_slots": 0, "block_rebuild_postings": 0}
     started = time.perf_counter()
     idx = getattr(cg, "_bm25_index", None)
     if idx is None:
