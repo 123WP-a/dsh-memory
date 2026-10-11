@@ -142,6 +142,11 @@ def temporal_gamma(environ=None) -> float:
     return math.log(2.0) / float(DECAY_DAYS)
 
 
+def _tokens_from_counts(cjk: int, other: int) -> int:
+    """Shared nonempty-text estimate, preserving the existing float formula."""
+    return int(cjk * 0.6 + other / 4) + 1
+
+
 # 生效条件：text 为假值（None/空串）时返回 0，否则按「CJK 0.6/字 + 其余 /4」计算并返回 int(cjk*0.6 + other/4) + 1。
 def est_tokens(text: str) -> int:
     """确定性 token 估算：CJK 0.6/字 + 其余 /4（与白箱 adapter 口径一致）。"""
@@ -150,7 +155,7 @@ def est_tokens(text: str) -> int:
     cjk = sum(1 for ch in text if 0x4e00 <= ord(ch) <= 0x9fff
               or 0x3040 <= ord(ch) <= 0x30ff)
     other = len(text) - cjk
-    return int(cjk * 0.6 + other / 4) + 1
+    return _tokens_from_counts(cjk, other)
 
 
 # 生效条件：text 非空且 max_tokens > 0 时返回 est_tokens 口径 ≤ max_tokens 的摘录，text 为空或 max_tokens ≤ 0 时返回空串 ''，est_tokens(text) ≤ max_tokens 时原样返回 text。
@@ -159,28 +164,28 @@ def excerpt_tokens(text: str, max_tokens: int) -> str:
 
     定义在模块级而非类内：它被 MdCGOS.recall 的装包循环调用，放在任一类的内部
     都可能让另一处拿不到（同类错误曾导致 AttributeError）。
-    预算含省略号本身（"…" 也是 CJK 字符，会被计费），因此先扣除其开销再取正文，
-    保证返回值的 est_tokens 严格 ≤ max_tokens。
+    预算按「正文前缀 + 省略号」整体估算，保留能够容纳的最长前缀。
+    省略号属于其余字符；整体估算中的固定 +1 只计一次。
     """
     if not text or max_tokens <= 0:
         return ""
     if est_tokens(text) <= max_tokens:
         return text                      # 已足够小，原样返回（不放大）
     ellipsis = "…"
-    ell_cost = est_tokens(ellipsis)
-    body_budget = max_tokens - ell_cost
-    if body_budget <= 0:
-        return ellipsis if ell_cost <= max_tokens else ""
-    approx = min(len(text), max(1, int(body_budget / 0.6)))
-    while approx > 1 and est_tokens(text[:approx]) > body_budget:
-        approx -= max(1, approx // 10)   # 精确口径回退，步长随窗口收缩
-    keep = max(0, approx)
-    out = text[:keep].rstrip() + ellipsis
-    if est_tokens(out) > max_tokens:      # 兜底：仍超则继续收缩
-        while keep > 1 and est_tokens(text[:keep].rstrip() + ellipsis) > max_tokens:
-            keep -= max(1, keep // 10)
-        out = text[:keep].rstrip() + ellipsis
-    return out
+    cjk = other = keep = 0
+    for index, char in enumerate(text):
+        if 0x4e00 <= ord(char) <= 0x9fff or 0x3040 <= ord(char) <= 0x30ff:
+            cjk += 1
+        else:
+            other += 1
+        # rstrip removes trailing whitespace; an internal gap still counts
+        # when a later nonspace character is admitted.
+        if char.isspace():
+            continue
+        if _tokens_from_counts(cjk, other + 1) > max_tokens:
+            break
+        keep = index + 1
+    return text[:keep] + ellipsis
 
 
 # 生效条件：text 为可调用 .strip().encode("utf-8") 的字符串时，返回 hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:n]，n 默认 12 只决定摘要截取长度。
