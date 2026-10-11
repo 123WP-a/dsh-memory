@@ -154,7 +154,7 @@ def mutations(output):
     original = mdcos.excerpt_tokens
     def run(name):
         stream = io.StringIO()
-        result = unittest.TextTestRunner(stream=stream).run(ExcerptBudget(name))
+        result = unittest.TextTestRunner(stream=stream, failfast=True).run(ExcerptBudget(name))
         owner = lambda t: getattr(t, "test_case", t)._testMethodName
         return {"failures": [owner(t) for t, _ in result.failures], "errors": [owner(t) for t, _ in result.errors],
                 "skips": [owner(t) for t, _ in result.skipped],
