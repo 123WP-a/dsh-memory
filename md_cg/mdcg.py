@@ -389,7 +389,7 @@ CN_STOP_GRAMS = {
 }
 
 
-# 生效条件：当 query 非空且环境变量 MDCG_CN_GRAMS 不为 "0" 时，对 query 中长度 ≥ max(min_run,2) 的连续中文串切 2-gram，去重且排除 CN_STOP_GRAMS，最多 cap 个返回；MDCG_CN_GRAMS=="0" 或 query 为假值时返回 []（cap<=0 仍会 append 后立即返回首个 gram）。
+# 生效条件：当 query 非空且环境变量 MDCG_CN_GRAMS 不为 "0" 时，对 query 中长度 ≥ max(min_run,2) 的连续中文串切 2-gram，去重且排除 CN_STOP_GRAMS；cap 为 None 时**不限**（返回全部 gram），cap<=0 时逐位保留旧行为（append 后立即返回首个 gram——注意 cap=0 **不是**「不限」）；否则各段 gram 总数 ≤ cap 时按段序拼接返回（与旧实现逐位相同），超过 cap 时**跨段轮转**取键（各段按比例进入召回面，长查询的末尾段不再恒为 0），最多返回 cap 个。
 def cn_recall_grams(query: str, min_run: int = 4, cap: int = 16) -> list:
     """构词法 v1 · 中文召回扩展：把连续中文串切成 2-gram 作为额外召回键。
 
@@ -399,18 +399,47 @@ def cn_recall_grams(query: str, min_run: int = 4, cap: int = 16) -> list:
 
     约束：只扩召回，不改打分口径（bigrams(q) 的 _score 不变）；纯标准库，零依赖；
     仅当中文连续串 ≥ min_run 字时触发（短词本身已是召回词，无需扩展）。
+
+    #108（2026-10-10）· **预算分配**：旧实现对每段 gram 顺次 append，一旦
+    len(out) >= cap 就整函数返回 ⇒ 长查询（题卡式「两段以换行拼接」）只有
+    **开头段**进入召回键。实测 64 字 + 12 字两段查询：cap=16 时全查询 gram
+    覆盖 0.218、**末段覆盖 0.000**；cap=32 仍 0.000；cap=64 为 0.159。现改为
+    预算不足时**跨段轮转**（段内保序），使末段按比例进入召回面（同例 cap=16 时
+    末段覆盖 0.727）。预算够时**逐位同旧**（短查询零差异）。cap=None 是「不限」的
+    显式表示（返回全部 gram，覆盖率 1.000；代价是 LIKE 召回词数增多、候选面变大，
+    由调用方/评测按需选用）。cap<=0 逐位保留旧行为（cap=0 不是「不限」）。
     """
     if os.environ.get("MDCG_CN_GRAMS") == "0":   # A/B 开关：关闭即回退旧行为
         return []
-    out = []
+    # 先按段收集（段内保序、跨段全局去重）——去重/停用词语义与旧实现逐位一致。
+    runs, seen = [], set()
     for run in re.findall(r"[\u4e00-\u9fff]{%d,}" % max(min_run, 2), query or ""):
+        grams = []
         for i in range(len(run) - 1):
             g = run[i:i + 2]
-            if g in CN_STOP_GRAMS or g in out:
+            if g in CN_STOP_GRAMS or g in seen:
                 continue
-            out.append(g)
-            if len(out) >= cap:
-                return out
+            seen.add(g)
+            grams.append(g)
+        if grams:
+            runs.append(grams)
+    if cap is not None and cap <= 0:     # 旧行为逐位保留（cap=0 不是「不限」）
+        return [runs[0][0]] if runs else []
+    total = sum(len(r) for r in runs)
+    if cap is None or total <= cap:      # 预算够：段序拼接（与旧实现逐位相同）
+        return [g for r in runs for g in r]
+    out, depth = [], 0                   # 预算不足：跨段轮转（各段按比例）
+    while len(out) < cap:
+        moved = False
+        for r in runs:
+            if depth < len(r):
+                out.append(r[depth])
+                moved = True
+                if len(out) >= cap:
+                    break
+        if not moved:
+            break
+        depth += 1
     return out
 
 
