@@ -3675,6 +3675,12 @@ def _dispatch(cg, name, args):
                                        layer=_layer,
                                        sensitivity=a.get("sensitivity"),
                                        info=True)
+            # issue #109 题3(b)（2026-10-10 裁定）：本分支 = 协议声明形态
+            # autonomy_ticket（自治档位出单）。该路径**没有 audit verdict**
+            # ——硬补一个 verdict 等于编造判据，故协议把「自治出单」登记成
+            # **独立形态**（protocol.VERB_SPECS["write"]["shapes"]["autonomy_ticket"]，
+            # required 取本分支真实键集、**不含 verdict**）；判据面由
+            # committed=False + moved_to + pid（可轮询的入队句柄）承担。
             return {"ok": True, "id": nid, "committed": False,
                     "moved_to": "review_queue", "pid": _pr["pid"],
                     "mutation": _pay, "autonomy": _aut,
@@ -3698,8 +3704,17 @@ def _dispatch(cg, name, args):
                          derived_from=_split_ids(a.get("derived_from")),
                          relation=a.get("relation"))
         if written is None:
-            return {"ok": False, "id": nid, "verdict": "DEFER",
-                    "reason": "节点间冲突检测未通过（on_conflict=defer）"}
+            # issue #109 题2（2026-10-10 裁定）：冲突 DEFER 同属「未落盘」，与闸门
+            # 短路分支**同口径**补齐三键铁律与去向词（此前只有 ok/id/verdict/reason
+            # ——判 committed 的调用方拿到的是缺键，只能猜）。
+            # conflict_deferred 语义＝**冲突导致 defer：既未落盘、也未入队**
+            # （与 review_queue「已入队待裁」区分：本条**不给 pid**，调用方据此
+            # 不轮询队列）。hint 同补——gate_short_circuit 形态的 required 含 hint。
+            return {"ok": False, "id": nid, "committed": False,
+                    "moved_to": "conflict_deferred", "verdict": "DEFER",
+                    "reason": "节点间冲突检测未通过（on_conflict=defer）",
+                    "hint": "冲突未落盘也未入队：改正文消解冲突，或显式 "
+                            "on_conflict=record 记录放行后重写"}
         # issue #109 相邻面：工具面**同一返回体**在闸门短路分支给 committed=False，
         # 成功分支此前却不给 committed ⇒ 判 committed 的调用方会把「成功」读成
         # 「未提交」（与 #109 报的「把待审读成已提交」是同一处的两面）。

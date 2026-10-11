@@ -58,6 +58,26 @@ VERBS = ("route", "read", "write", "supersede", "forget")
 #: 这是协议对三端客户端最有价值的一条：ok/committed 分离表达「闸门行为 ≠ 工具故障」。
 WRITE_TRIO = ("ok", "id", "committed")
 
+#: **工具面 → 动词绑定**（issue #109 题1，2026-10-10 裁定）：写动词的 I/O 形状铁律
+#: 不只约束 `cg(op=write)`，也约束**专用工具面**。`mdcg_remember` 是 hooks 自动记忆
+#: 与直写的主通路（`mcp_server._dispatch` 的 mdcg_remember 分支），它此前**未在协议里
+#: 出现**——于是「同一返回体在成功分支不给 committed、在待审分支给 committed=False」
+#: 这类漂移没有声明可对：客户端只能按 ok 猜（把待审读成已提交）。
+#: 声明语义：该工具面的每个 **dict 返回体**都必须 ①含 WRITE_TRIO；②未 committed 时
+#: 给去向（moved_to 或 gate）；③满足 write 的**至少一个声明形态**。由
+#: `test_write_return_shape` 的「按声明形态全量校验」（静态 AST 面 + 运行面）钉住。
+#: 注：`gated=true` 分支委托 `mdcos.remember_gated` 返回**闸门裁决信封**
+#: （ok/gate/verdict/written，无 id/committed）——它不在三键面，见该守卫的显式豁免判据。
+TOOL_FACE_BINDINGS = {
+    "mdcg_remember": {
+        "verb": "write",
+        "mutating": True,
+        "shapes_from": "write",
+        "impl": ("mcp_server", "_dispatch"),
+        "note": "受 WRITE_TRIO 铁律约束；gated=true 分支委托 remember_gated（闸门裁决信封，另计）",
+    },
+}
+
 #: op 推导兜底（`_cg_call` wrapper，2026-09-13 防呆落地）：op 漏传时按入参签名推导。
 #: 协议侧只作**文档化声明**（供客户端理解兜底语义），不做静态对账——
 #: 推导实现散落在 wrapper 分支里，强做正则对账会误报（宁可少断言，不可假绿灯）。
@@ -199,6 +219,16 @@ VERB_SPECS = {
                 "when": "主动遗忘闸（gated=true）替代落盘路径",
                 "required": WRITE_TRIO + ("gate", "verdict"),
                 "optional": ("consistency", "moved_to", "propagation"),
+            },
+            "autonomy_ticket": {
+                "when": "自治档位出单（确认档：变更单入审核队列、本次不落盘）",
+                # issue #109 题3(b)（2026-10-10 裁定）：自治出单**没有 audit
+                # verdict**（它不走 audit 链），硬补 verdict 等于编造判据 ——
+                # 故登记成独立形态：required 取该分支**真实键集**（不含 verdict），
+                # 判据面由 committed=False + moved_to + pid 承担。
+                "required": WRITE_TRIO + ("moved_to", "pid", "mutation",
+                                          "autonomy", "hint"),
+                "optional": (),
             },
         },
         "semantics": "写动词多形态：committed=已落盘；未 committed 时 moved_to/gate 说明去向，"
@@ -350,6 +380,15 @@ def audit(module: str = None, func: str = None) -> dict:
             shape_errors.append(f"{v}: reserved 但未声明 map_to 现状映射证据")
         if spec.get("status") == "live" and not spec.get("impl"):
             shape_errors.append(f"{v}: live 但未声明 impl 落点")
+    # 工具面绑定自洽（issue #109 题1）：绑定的动词必须已声明，且 shapes_from 必须
+    # 指向一个已声明动词——否则「该工具面受三键铁律约束」这句声明无从校验（装饰）。
+    for _tool, _bind in TOOL_FACE_BINDINGS.items():
+        if _bind.get("verb") not in VERB_SPECS:
+            shape_errors.append(
+                f"{_tool}: 绑定动词未声明 {_bind.get('verb')!r}")
+        if _bind.get("shapes_from") not in VERB_SPECS:
+            shape_errors.append(
+                f"{_tool}: shapes_from 未声明 {_bind.get('shapes_from')!r}")
     errors = []
     if not got.get("ok"):
         errors.append(f"源码提取失败：{got.get('error')}")
@@ -367,6 +406,9 @@ def audit(module: str = None, func: str = None) -> dict:
             "derive": list(OP_DERIVE), "errors": errors, "ok": not errors,
             # 扩展能力面的两条契约登记（2026-09-30）：wrapper 级恒定键 +
             # protect.mark 负路由形态——都不属五动词形状表，故不并入 VERB_SPECS。
+            # 工具面绑定（issue #109 题1）：声明的「工具面 → 动词」落点，客户端可据此
+            # 知道专用工具面与动词面**同一套形状铁律**。
+            "tool_faces": {t: dict(b) for t, b in TOOL_FACE_BINDINGS.items()},
             "action_source": {"key": ACTION_SOURCE_KEY,
                               "values": list(ACTION_SOURCE_VALUES)},
             "protect_neg_route": {"error": PROTECT_MARK_NEG_ROUTE_ERROR,
