@@ -37,7 +37,7 @@ class ExactTextCache(unittest.TestCase):
         return cg
 
     def docs(self, cg):
-        return [(entry, *cg._read(entry)) for entry in cg.index["nodes"].values()]
+        return [(entry, *cg._read(entry)) for entry in list(cg.index["nodes"].values())]
 
     def score(self, cg, query):
         return cg._score(self.docs(cg), query, mdcg.bigrams(query))

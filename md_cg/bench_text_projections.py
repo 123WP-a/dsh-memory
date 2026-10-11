@@ -38,7 +38,8 @@ def worker(repo, root):
     cg = MdCGOS(str(root))
     print(json.dumps({"ready": True, "nodes": len(cg.index["nodes"]),
                       "commit": subprocess.check_output(
-                          ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()}), flush=True)
+                          ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          text=True, encoding="utf-8", errors="replace").strip()}), flush=True)
     try:
         for line in sys.stdin:
             req = json.loads(line)
