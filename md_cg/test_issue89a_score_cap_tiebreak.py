@@ -53,7 +53,7 @@ _QUERY = "灵枢阁"
 #: 源码锚点（字面 → 期望出现次数）。实现漂移则计数变 ⇒ 变异表失效 ⇒ exit 2。
 _SRC_COUNTS = [
     ('EXACT_HIT_KEY = "_exact_hit"', 1),          # 判据单点定义
-    ("EXACT_HIT_KEY: exact_hit_of(q, c)", 1),     # _score 携带
+    ("EXACT_HIT_KEY: exact_hit_of(q, c, _prepared=(", 1),  # _score 携带同一判据
     ("-int(scored[i][0].get(EXACT_HIT_KEY) or 0)", 1),   # cut_by_relevance
     ("-int(x[0].get(EXACT_HIT_KEY) or 0)", 2),    # _emit 终排 + S3 合并
     ("_r[0].pop(EXACT_HIT_KEY, None)", 1),        # 出口剥离
@@ -172,14 +172,14 @@ def _anchor_preflight():
 def _mut_exact_always_zero():
     """判据失效：恒判非精确 ⇒ 排序退回 id 字典序（复现 #89① 缺陷形态）。"""
     orig = mdcg.exact_hit_of
-    mdcg.exact_hit_of = lambda q, c: 0
+    mdcg.exact_hit_of = lambda q, c, **kw: 0
     return lambda: setattr(mdcg, "exact_hit_of", orig)
 
 
 def _mut_exact_always_one():
     """退化解：恒判精确 ⇒ 判据失去分辨力。"""
     orig = mdcg.exact_hit_of
-    mdcg.exact_hit_of = lambda q, c: 1
+    mdcg.exact_hit_of = lambda q, c, **kw: 1
     return lambda: setattr(mdcg, "exact_hit_of", orig)
 
 

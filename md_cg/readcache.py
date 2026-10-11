@@ -214,6 +214,28 @@ def install(cg):
 
         cg._positive_body = _cached_pb
         cg._positive_body_cache = pb_cache
+
+    # Exact-hit scoring used to remove whitespace from every full document on
+    # every query. Reuse the pure document projection with the same path and
+    # dirty-generation validity as the other derived text caches.
+    exact_cache = {}
+    if hasattr(cg, "_doc_exact_text"):
+        orig_exact = (getattr(cg, "_doc_exact_text_uncached", None)
+                      or cg._doc_exact_text)
+        cg._doc_exact_text_uncached = orig_exact
+
+        def _cached_exact(entry, content):
+            p = entry["path"]
+            gen = getattr(cg._dirty, "write_gen", len(cg._dirty))
+            hit = exact_cache.get(p)
+            if hit is not None and _fresh(p, hit):
+                return hit[1]
+            val = orig_exact(entry, content)
+            exact_cache[p] = (gen, val)
+            return val
+
+        cg._doc_exact_text = _cached_exact
+        cg._exact_text_cache = exact_cache
     return cache
 
 
@@ -227,6 +249,10 @@ def clear(cg) -> int:
     candidate_index = getattr(cg, "_rrf_candidate_index", None)
     if candidate_index is not None:
         candidate_index.clear()
+    # Preserve clear()'s established count of the original three cache types.
+    extra = getattr(cg, "_exact_text_cache", None)
+    if extra is not None:
+        extra.clear()
     for attr in ("_read_cache", "_norm_bigrams_cache", "_positive_body_cache"):
         c = getattr(cg, attr, None)
         if c:

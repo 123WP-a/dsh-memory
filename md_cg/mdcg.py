@@ -591,7 +591,12 @@ EXACT_MIN_LEN = 2
 
 
 # 生效条件：q 与 content 去全部空白后，q 长度 >= EXACT_MIN_LEN 且作为**连续子串**出现在 content 中 -> 返回 1，否则 0（假值按 "" 处理）。
-def exact_hit_of(q: str, content: str) -> int:
+def compact_exact_text(text: str) -> str:
+    """The existing exact-match whitespace normalization, without case folding."""
+    return re.sub(r"\s+", "", text or "")
+
+
+def exact_hit_of(q: str, content: str, *, _prepared=None) -> int:
     """整串精确命中（0/1）——**分数之外的次级排序键**（issue #89①）。
 
     缺陷（本端实测复现，2026-10-09）：打分走 bigram 覆盖度，**连续整串**与
@@ -608,10 +613,13 @@ def exact_hit_of(q: str, content: str) -> int:
     取首位、MCP 三处把 score 透给调用方），改 cap 或让分数越过 1.0 会破契约；
     本判据只加 0/1 标记，**分数与阈值语义一字不动**。
     """
-    _q = re.sub(r"\s+", "", q or "")
+    # Only the scoring loop supplies prepared texts. The public two-argument
+    # entry keeps normalizing its own inputs and uses the same predicate.
+    _q = compact_exact_text(q) if _prepared is None else _prepared[0]
     if len(_q) < EXACT_MIN_LEN:
         return 0
-    return 1 if _q in re.sub(r"\s+", "", content or "") else 0
+    body = compact_exact_text(content) if _prepared is None else _prepared[1]
+    return 1 if _q in body else 0
 
 
 # 负条件判据的词长下限（批次76）：空白切词会把中文句子里夹的裸标识符切成独立词、
@@ -3541,6 +3549,14 @@ class MdCG:
         """
         return nodefile.positive_body(content)
 
+    def _doc_exact_text(self, entry, content):
+        """Whitespace-free full content for the existing exact-hit tie break.
+
+        Readcache wraps this document-only projection with its existing dirty
+        generations. Query normalization stays local to each scoring call.
+        """
+        return compact_exact_text(content)
+
     # ---------- 资格判定（与性能 tier 正交）----------
 
     @staticmethod
@@ -4333,6 +4349,7 @@ class MdCG:
         _fr_on = freshness.enabled()
         _fr_now = freshness.freshness_now() if _fr_on else None
         _fr_gamma = freshness.resolve_gamma(None) if _fr_on else None
+        _exact_q = compact_exact_text(q)
         scored = []
         for e, fm, c in docs:
             # 归一化 content 后取 bigram（与 query 侧 normalize_en 对称）；
@@ -4368,7 +4385,9 @@ class MdCG:
                             "content": c, "path": e["path"],
                             # issue #89①：精确命中标记随 doc 携带，供排序键消费；
                             # _emit 出口剥离（内部键，不透出）。
-                            EXACT_HIT_KEY: exact_hit_of(q, c)}, raw))
+                            EXACT_HIT_KEY: exact_hit_of(q, c, _prepared=(
+                                _exact_q, self._doc_exact_text(e, c)
+                                if len(_exact_q) >= EXACT_MIN_LEN else ""))}, raw))
         return scored
 
 
