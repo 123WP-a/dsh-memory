@@ -272,10 +272,17 @@ def clear(cg) -> int:
     if candidate_index is not None:
         candidate_index.clear()
     # Preserve clear()'s established count of the original three cache types.
+    # （PR #116 新增的两类检索文本投影缓存：一并清空，但不计入返回值。）
     for attr in ("_exact_text_cache", "_like_lower_cache"):
         extra = getattr(cg, attr, None)
         if extra is not None:
             extra.clear()
+    # （PR #114 新增的 BM25 派生索引与候选池：同属「派生缓存」，一并清空，
+    #   同样不计入返回值——返回值口径仍只报原三类。）
+    bm25_index = getattr(cg, "_bm25_index", None)
+    if bm25_index is not None:
+        bm25_index.clear()
+    cg._bm25_candidate_pool = None
     for attr in ("_read_cache", "_norm_bigrams_cache", "_positive_body_cache"):
         c = getattr(cg, attr, None)
         if c:
