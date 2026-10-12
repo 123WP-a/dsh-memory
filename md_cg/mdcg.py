@@ -91,6 +91,47 @@ DEMOTE_CONFIDENCE = 0.2
 # 保证当前任务的连续性。只做 append + 截断，不参与词法正排（不稀释既有基线）。
 DEFAULT_RECENT_WINDOW = 200
 
+
+def check_recent_event(role, text, window=DEFAULT_RECENT_WINDOW) -> None:
+    """近期事件写口入参闸（issue #166①）：非法即抛 ValueError（fail-closed）。
+
+    病象：`cg(op=recent, action=add)` 曾把数字/列表原样落盘；读侧
+    `crypto.is_encrypted(r.get("text"))` 对非 str 调 `.lstrip()` ⇒ info / recent /
+    health / recall(include_recent) 全线 AttributeError，且重启不自愈。
+    形态与仓库既有「类型错 ⇒ 不静默降级」一致：写面抛异常（同族读面闸见
+    mcp_server 的 `node_id_not_str` 结构化 error 一族），不静默降级。
+    """
+    if role and not isinstance(role, str):
+        raise ValueError("recent: role 须为字符串（收到 %s）" % type(role).__name__)
+    if text and not isinstance(text, str):
+        raise ValueError("recent: text 须为字符串（收到 %s）" % type(text).__name__)
+    if window is None:
+        return
+    if isinstance(window, bool) or not isinstance(window, int):
+        raise ValueError("recent: window 须为整数（收到 %s）"
+                         % type(window).__name__)
+    if window < 1:
+        raise ValueError("recent: window 须 >= 1（收到 %s）" % (window,))
+
+
+def recent_record_ok(r) -> bool:
+    """读侧容错判据（issue #166②）：只放行 text 为 str、role 为空或 str 的行。
+
+    **读入处**过滤：一次坏写入不再让 info / recent / health /
+    recall(include_recent) 全线 AttributeError。为什么必须在这一层：
+    `mdcos.MdCGSecure.recent_events` 在 `super().recent_events(...)` 的结果上逐行
+    `r.get("meta")` / `crypto.is_encrypted(r.get("text"))`，坏行（含非 dict 行）会在
+    那里炸穿读隔离层；先过滤 ⇒ 上层只拿到好行。role 允许缺失（存量/旁路写入的兼容
+    面）——只拒「有值但非 str」（读侧 `set(roles)` 对不可哈希的 role 会 TypeError）。
+    """
+    if not isinstance(r, dict):
+        return False
+    if not isinstance(r.get("text"), str):
+        return False
+    role = r.get("role")
+    return role is None or isinstance(role, str)
+
+
 # 全量回退的读取上限，对齐 sqlite 版 `ORDER BY importance DESC, created_at DESC LIMIT 500`
 GLOBAL_CAP = 500
 
@@ -3259,6 +3300,7 @@ class MdCG:
     def remember_event(self, role: str, text: str, tags=None, meta=None,
                        window: int = DEFAULT_RECENT_WINDOW):
         """追加一条近期事件（原始、未结构化），并按窗口滚动截断。"""
+        check_recent_event(role, text, window)
         rec = {"t": time.time(), "role": role or "user",
                "text": text or "", "tags": list(tags or []),
                "meta": dict(meta or {})}
@@ -3282,7 +3324,12 @@ class MdCG:
     def recent_events(self, limit: int = 20, roles=None, since=None,
                       newest_first: bool = True):
         """读取近期事件（默认最新在前）。roles 过滤角色，since 过滤时间戳。"""
-        recs = list(read_jsonl(self.recent_log))
+        # issue #166②：**读侧容错单点**——坏行（非 dict / text 非 str / role 有值
+        # 但非 str）在**读入处**过滤：一次坏写入不再让 info / recent / health /
+        # recall(include_recent) 全线 AttributeError（Secure 层在 super() 结果上
+        # 逐行 r.get("meta") / crypto.is_encrypted(r.get("text"))，坏行正是在那炸）。
+        # 顺序要紧：先过滤坏行，后做 roles / since 过滤（坏行不得流到过滤面上）。
+        recs = [r for r in read_jsonl(self.recent_log) if recent_record_ok(r)]
         if roles:
             allow = set(roles)
             recs = [r for r in recs if r.get("role") in allow]

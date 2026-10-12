@@ -2041,6 +2041,43 @@ def _task_call(cg, a):
 
 
 # 生效条件：op 取 a.get("op") 转 str 去空白并 lower；缺失时按参数签名回推（含 content→write / query|node_id→read / intent→route；无签名可推时维持 read），op=="help" 在角色闸门之前直通 _help_call；其余 op 先经 cg.principal.require_op(op)（越权即 AccessDenied）再按 alias→内联名→cli 表分派；未识别 op 抛 ValueError；fork：op=="forget" 的**删除**分支走 cg.forget_gated（三档自治批次②：档位判定在既有资格闸之后，变更确认档出变更单且不软删；restore 分支不变），op=="write" 经 writepipe 默认链（链尾 autonomy 档位闸）；
+def _gate_link_signers_file(a):
+    """issue #167：signers_file 由调用方指定 = 调用方自选「验签策略来源」。
+
+    指向不存在的文件时 `signer.load_policies` 返回空策略表
+    （`require_peer_signature=False`）⇒ 一次参数即可关掉强制对端签名。
+    收口：只接受运维侧现行策略文件（realpath 归一）；未传则行为逐位不变。
+    """
+    sf = a.get("signers_file")
+    if not sf:
+        return
+    from . import signer as _sg
+    cur = _sg.signers_file()
+    if os.path.realpath(str(sf)) != os.path.realpath(cur):
+        raise ValueError("link: signers_file 只能指向现行策略文件（%s），收到 %s"
+                         % (cur, sf))
+
+
+def _import_subsystem_gate(a, ev):
+    """issue #167：import 不得挑一个**更松**的子系统策略来验签。
+
+    未声明子系统回落缺省策略（不要求对端签名）⇒ 传 `subsystem="x"` 即绕过强制
+    对端签名。更松时返回与「验签失败」同形的拒收 dict（不抛，保持 import 的
+    拒收语义自洽）；与基准同档或更严返回 None（放行）。
+    """
+    from . import signer as _sg
+    sub = a.get("subsystem") or ev.SUBSYSTEM
+    if sub == ev.SUBSYSTEM:
+        return None
+    why = _sg.weaker_than(_sg.policy_for(sub, a.get("signers_file")),
+                          _sg.policy_for(ev.SUBSYSTEM, a.get("signers_file")))
+    if not why:
+        return None
+    return {"ok": False, "rejected": True, "subsystem": sub,
+            "reason": "import 子系统 %s 的策略弱于 %s：%s"
+                      % (sub, ev.SUBSYSTEM, why)}
+
+
 def _cg_dispatch(cg, a):
     """认知图唯一入口的 op 分发主体。"""
     op = (a.get("op") or "read").strip().lower()
@@ -2080,6 +2117,7 @@ def _cg_dispatch(cg, a):
         from . import links as _lk
         act = (a.get("action") or "ls").strip().lower()
         _actor = _p.actor if _p is not None else "system"
+        _gate_link_signers_file(a)
         if act == "catalog":
             return _lk.catalog()
         if act == "ls":
@@ -2112,10 +2150,17 @@ def _cg_dispatch(cg, a):
         if act == "policy":                       # 子系统签名策略（D-4）
             from . import signer as _sg
             if a.get("set"):
-                return _sg.set_policy(a.get("subsystem"), **{
-                    k: a[k] for k in ("signer", "sign_on",
-                                      "require_peer_signature",
-                                      "on_verify_fail") if k in a})
+                _kw = {k: a[k] for k in ("signer", "sign_on",
+                                         "require_peer_signature",
+                                         "on_verify_fail") if k in a}
+                # issue #167：放宽（含更换 signer）须管理权；收紧不限角色——否则
+                # 持有 link op 而无 admin 的角色（如 sustain）一次调用即可关掉
+                # 强制对端签名。判定在 set_policy **之前**（loosening 不写盘）。
+                _why = _sg.loosening(a.get("subsystem"),
+                                     path=a.get("signers_file"), **_kw)
+                if _why and _p is not None:
+                    _p.require_admin("link/policy 放宽签名策略：%s" % _why)
+                return _sg.set_policy(a.get("subsystem"), **_kw)
             return _sg.show()
         # ---- 跨节点证据存储（v0.3）------------------------------------
         if act in ("card", "node_card"):
@@ -2162,6 +2207,11 @@ def _cg_dispatch(cg, a):
                 src = json.loads(src)
             if src is None:
                 raise ValueError("link/import 需要 path（包文件）或 pack（内联对象）")
+            # issue #167：验签前置——数据包按哪个子系统的策略验签**不得由调用方
+            # 挑松**（未声明子系统回落缺省策略 = 不要求对端签名）；更松即拒。
+            _rej = _import_subsystem_gate(a, _ev)
+            if _rej is not None:
+                return _rej
             return _ev.import_pack(
                 cg, src, subsystem=a.get("subsystem") or _ev.SUBSYSTEM,
                 swarm=a.get("swarm"), signers_file=a.get("signers_file"))

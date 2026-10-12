@@ -5658,6 +5658,16 @@ class MdCGSecure(MdCGOS):
         sens = sensitivity or DEFAULT_SENSITIVITY
         _rank(sens)
         self.principal.require_write(sens)
+        if window is not None:
+            # issue #166③：收窄滚动窗口 = 变相绕过 clear 的管理闸（window<=0
+            # 清空、window=1 只留一条）——与 clear_recent 的 require_admin 同构。
+            from .mdcg import DEFAULT_RECENT_WINDOW as _DRW
+            try:
+                _w = int(window)
+            except (TypeError, ValueError):
+                _w = None
+            if _w is not None and _w < _DRW:
+                self.principal.require_admin("shrink_recent_window")
         m = dict(meta or {})
         m.setdefault("tenant", self.principal.tenant)
         # 写归因三态（2026-10-07）：此前恒取 principal.session（自动随机时事件

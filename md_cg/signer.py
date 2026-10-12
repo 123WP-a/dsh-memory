@@ -371,6 +371,42 @@ def policy_for(subsystem: str = None, path: str = None) -> dict:
 
 
 # 生效条件：subsystem 为假值（None/空串）时抛 SignerError("子系统名不能为空")；否则 kw 中非 None 项合并进该子系统策略并落盘，且 kw.get("default_signer") 为真值时同时更新 d["default_signer"]。
+_FAIL_RANK = {"degrade": 0, "isolate": 1, "reject": 2}
+
+
+def weaker_than(pol: dict, base: dict) -> str:
+    """pol 相对 base 是否**更松**（issue #167）：更松返回原因串，否则 ''。
+
+    验签要求单调性的**唯一判据单点**（只能更严不能更松），供 import / observe /
+    policy set 三处闸共用——三处各写一份判据必然漂开（本仓既有教训）。
+    """
+    if not isinstance(pol, dict) or not isinstance(base, dict):
+        return ""
+    if (bool(base.get("require_peer_signature"))
+            and not bool(pol.get("require_peer_signature"))):
+        return "require_peer_signature 由 True 变 False"
+    if (_FAIL_RANK.get(pol.get("on_verify_fail"), 0)
+            < _FAIL_RANK.get(base.get("on_verify_fail"), 0)):
+        return ("on_verify_fail 由 %s 降为 %s"
+                % (base.get("on_verify_fail"), pol.get("on_verify_fail")))
+    return ""
+
+
+def loosening(subsystem: str, path: str = None, **kw) -> str:
+    """按 set_policy 的**同一合并口径**预判「新策略相对现行策略是否放宽」。
+
+    放宽返回原因串，否则 ''。更换 signer（换验签实现）按放宽处理（保守侧：要求
+    管理权）。本函数**不写盘、无副作用**；`set_policy` 仍是唯一落盘点。
+    """
+    cur = policy_for(subsystem, path)
+    new = {k: v for k, v in kw.items() if v is not None and k != "path"}
+    if "signer" in new and new["signer"] != cur.get("signer"):
+        return "signer 由 %s 换为 %s" % (cur.get("signer"), new["signer"])
+    nxt = dict(cur)
+    nxt.update(new)
+    return weaker_than(nxt, cur)
+
+
 def set_policy(subsystem: str, path: str = None, **kw) -> dict:
     """声明/更新子系统签名策略——**这是智能体行使 D-4 的入口**。"""
     if not subsystem:
