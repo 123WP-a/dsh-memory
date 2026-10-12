@@ -190,6 +190,7 @@ def _mutate_mode():
 
 
 def main(argv):
+    global _red          # 必须声明：否则 _red=[] 成为局部变量，汇总恒报「失败 0」
     if "--mutate" in argv:
         return _mutate_mode()
     print("== hive/chat.py 守卫（断言）==")
