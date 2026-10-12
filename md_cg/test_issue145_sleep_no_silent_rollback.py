@@ -45,7 +45,9 @@ def ok(cond, label, detail=""):
 
 
 def _mk_sandbox(tag):
-    sb = tempfile.mkdtemp(prefix="iss145_%s_" % tag, dir=r"D:\4_ai\_probe_tmp")
+    # 沙箱根一律取系统临时目录（**不得**硬编码本机路径：那会把探针产物
+    # 写到仓外固定位置，且本机路径不许进追踪面——本仓 check_local_paths 硬门禁）。
+    sb = tempfile.mkdtemp(prefix="iss145_%s_" % tag)
     root = os.path.join(sb, "lib")
     os.makedirs(os.path.join(root, "knowledge"))
     os.makedirs(os.path.join(root, "structural"))

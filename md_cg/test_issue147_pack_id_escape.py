@@ -88,8 +88,9 @@ def _sandbox():
     # **必须显式设 MDCG_SWARM_DIR**：`evidence.DEFAULT_SWARM_DIR` 在**模块导入时**
     # 由 aux_root() 冻结，而本守卫是模块顶层 `import evidence` ⇒ 只设 MDCG_AUX_ROOT
     # 不生效，归档会落到**真实** aux 目录（本守卫首版即踩此坑：实测污染了
-    # C:\Users\test\.mdcg\swarm\inbox 并在 C:\Users\test\memroot 留下穿越产物，
+    # `~/.mdcg/swarm/inbox` 并在家目录下留下穿越产物 `~/memroot`，
     # 已逐项核对清理——见 _team/iss147/report.md「探针污染」节）。
+    # ⚠ 本机绝对路径不得写进追踪面（check_local_paths 硬门禁），故此处用中性占位。
     # `swarm_dir()` 在**调用时**读该环境变量，故这是唯一有效的沙箱开关。
     os.environ["MDCG_SWARM_DIR"] = os.path.join(aux, "swarm")
     pol = os.path.join(t, "policy.json")
