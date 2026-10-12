@@ -146,7 +146,7 @@ def snapshot(root: str, index_nodes) -> dict:
             # 根级节点（path 无目录）不能靠「根目录 mtime」判定：我们自己写的
             # _postings.json / _postings_meta.json 就在根目录，会把根目录 mtime 改掉
             # → 快照刚建就自判过期（独立复核 2026-09-19 指出）。改为逐文件记 mtime。
-            files[p] = _mtime_ns(os.path.join(root or "", p))
+            files[p] = None          # [#154②] 由同趟 node_files 的 stat 回填（原为再 stat 一次）
         fp = os.path.join(root or "", p)
         try:
             st = os.stat(fp)
@@ -154,6 +154,8 @@ def snapshot(root: str, index_nodes) -> dict:
             node_files[p] = [None, None, None]     # 读不到即「证不出」，判据侧据此判陈旧
         else:
             node_files[p] = [st.st_mtime_ns, st.st_size, _file_digest(fp)]
+            if p in files:
+                files[p] = st.st_mtime_ns
     return {"nodes": len(index_nodes or {}),
             "dir_mtimes": {d: _mtime_ns(os.path.join(root or "", d)) for d in dirs},
             "file_mtimes": files,
@@ -188,26 +190,41 @@ def stale_reason(root: str, index_nodes, meta=None) -> str:
     if snap.get("nodes") != len(index_nodes):
         return "node_count_changed"
     want = snap.get("dir_mtimes") or {}
+    # [#154①] 三趟「按 index_nodes 派生集合」（目录 / 根级文件 / 节点路径）收成一趟：
+    # 原实现每节点算两次 os.path.dirname；本趟内 os.stat 亦记忆化——根级文件在
+    # file_mtimes 层与内容层会在同一次调用里各 stat 一次。判据与返回串逐位不变。
+    _stat_cache = {}
+    def _stat_of(_p):
+        if _p not in _stat_cache:
+            try:
+                _stat_cache[_p] = os.stat(_p)
+            except OSError:
+                _stat_cache[_p] = None
+        return _stat_cache[_p]
     dirs_now = set()
+    files_now = set()
+    paths_now = set()
     for e in index_nodes.values():
-        d = os.path.dirname((e or {}).get("path") or "")
+        _p = (e or {}).get("path") or ""
+        d = os.path.dirname(_p)
+        if _p:
+            paths_now.add(_p)
+            if not d:
+                files_now.add(_p)
         if d:
             dirs_now.add(d)          # 根级路径（无目录）由 file_mtimes 记账，见下
     if set(want.keys()) != dirs_now:
         return "dirs_changed"
     for d, mt in want.items():
-        if _mtime_ns(os.path.join(root or "", d)) != mt:
+        _st = _stat_of(os.path.join(root or "", d))
+        if (_st.st_mtime_ns if _st is not None else None) != mt:
             return "dir_touched"
     want_files = snap.get("file_mtimes") or {}
-    files_now = set()
-    for e in index_nodes.values():
-        p = (e or {}).get("path") or ""
-        if p and not os.path.dirname(p):
-            files_now.add(p)
     if set(want_files.keys()) != files_now:
         return "root_files_changed"
     for p, mt in want_files.items():
-        if _mtime_ns(os.path.join(root or "", p)) != mt:
+        _st = _stat_of(os.path.join(root or "", p))
+        if (_st.st_mtime_ns if _st is not None else None) != mt:
             return "root_file_touched"
     if snap.get("index_mtime") != _mtime_ns(os.path.join(root or "", "_index.json")):
         return "index_touched"
@@ -217,18 +234,12 @@ def stale_reason(root: str, index_nodes, meta=None) -> str:
         # 旧快照（本层引入前构建）无法证明「表与正文同源」——按「宁可慢，不可
         # 丢召回」的既有承诺 fail-closed：判过期、回退全量（重建一次即补上本层）。
         return "no_content_snapshot"
-    paths_now = set()
-    for e in index_nodes.values():
-        p = (e or {}).get("path") or ""
-        if p:
-            paths_now.add(p)
     if set(want_nf.keys()) != paths_now:
         return "node_files_changed"
     for p, rec in want_nf.items():
         fp = os.path.join(root or "", p)
-        try:
-            st = os.stat(fp)
-        except OSError:
+        st = _stat_of(fp)
+        if st is None:
             return "node_file_missing"       # 快照里有、盘上没了 ⇒ 表必过期
         if not isinstance(rec, (list, tuple)) or len(rec) < 2:
             return "no_content_snapshot"
