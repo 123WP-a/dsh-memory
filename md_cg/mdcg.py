@@ -32,6 +32,19 @@ from . import (nodefile, protect, routing, subgraph, chain, provenance, pooling,
 from .fsutil import (FileLock, ShardedLog, atomic_write, append_jsonl,
                      read_jsonl, sweep_stale_temps, note_bad_payload_rows)
 
+
+# ---- issue #173（健壮性）：形如 list(x or []) 的写法会把字符串静默拆成单字符 ----
+# 单点守卫：写入 / 发出路径的 6 处调用点统一走 _ensure_list——str 按「一个值」
+# 处理（不再逐字符展开）；None / 空串按空列表（与改动前逐位一致）；其余可迭代
+# 仍 list(x)。
+def _ensure_list(x):
+    """归一成列表：None/空串 -> []；str -> [str]；其它可迭代 -> list(x)。"""
+    if x is None:
+        return []
+    if isinstance(x, str):
+        return [x] if x else []
+    return list(x)
+
 # 五层 + 两类负记忆 + 目标槽（白箱记忆七件套工程化：事实/规则→knowledge；
 # 假设→contextual；失败/未解→独立目录；目标→goals）。
 # 第 5 篇第 3 章：「没有目标，检索就没有方向」——goals 层不参与词法正排，
@@ -2490,7 +2503,7 @@ class MdCG:
         # issue #150：**入口过滤空 tag**——空串 tag 会让 tag_bonus 恒发（`"" in q`）、
         # 也会污染桶路由键；写入侧先净化，检索侧四处（expand_query_terms/_like/
         # tag_bonus/负覆盖）另加非空守卫，两侧冗余是刻意的 defense-in-depth。
-        tags = [t for t in (tags or []) if str(t).strip()]
+        tags = [t for t in _ensure_list(tags) if str(t).strip()]
         # 标准语义摘要（semantic/canonical.py：词表真源 + OOV 审计，警告不拒绝）。
         # 语义校验失败不阻断写入（与 derived_from 建链降级同风格）。
         if semantic is not None:
@@ -2519,7 +2532,7 @@ class MdCG:
                 except Exception:
                     _bd_pre = None
             if _bd_pre:
-                tags = list(tags or [])
+                tags = _ensure_list(tags)
                 tags.append("domain:" + str(_bd_pre))
         bucket = None
         d = os.path.join(self.root, layer)
@@ -2562,9 +2575,9 @@ class MdCG:
             "importance": importance, "confidence": confidence,
             "condition_space": cs, "tags": tags,
             "created_at": created_at,
-            "access_count": 0, "last_access": 0, "edges": list(edges or []),
+            "access_count": 0, "last_access": 0, "edges": _ensure_list(edges),
             "verification_basis": verification_basis,
-            "non_applicable_conditions": list(non_applicable_conditions or []),
+            "non_applicable_conditions": _ensure_list(non_applicable_conditions),
             # 证据计数（白箱第 5 篇第 4 章）：每次 verify 累加，正/反例分开记
             "evidence_count": 0, "positive_evidence": 0, "negative_evidence": 0,
         }
@@ -4822,7 +4835,7 @@ class MdCG:
                     # 否则下游按 state 判定的地方会把它读成资格结论）
                     r[0]["boundary_hit"] = True
                     r[0]["boundary_marker"] = _b.get("marker")
-                    r[0]["boundary_terms"] = list(_b.get("terms") or [])
+                    r[0]["boundary_terms"] = _ensure_list(_b.get("terms"))
                 for _k in ("accept", "reject", "defer", "blindspot"):
                     _bnd["counts"][_k] += int(
                         (_jw.get("counts") or {}).get(_k) or 0)
@@ -5246,7 +5259,7 @@ class MdCG:
     def record_access(self, node_ids, tier=None):
         try:
             append_jsonl(self.access_log,
-                         {"t": time.time(), "ids": list(node_ids), "tier": tier})
+                         {"t": time.time(), "ids": _ensure_list(node_ids), "tier": tier})
         except OSError:
             pass
 
