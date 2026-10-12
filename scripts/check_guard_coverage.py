@@ -115,12 +115,25 @@ def gather_surfaces(repo: str) -> dict:
     wf_dir = os.path.join(repo, ".github", "workflows")
     if not os.path.isdir(wf_dir):
         raise OSError("workflows 目录不存在：" + wf_dir)
-    ci_text = ""
+    ci_text = ""  # 只取 run: 步骤命令行（不认注释 / paths: / name:）
     wf_names = []
     for name in sorted(os.listdir(wf_dir)):
         if name.endswith((".yml", ".yaml")):
             wf_names.append(name)
-            ci_text += _read(os.path.join(wf_dir, name)) + "\n"
+            _in_run = False
+            _run_ind = -1
+            for _ln in _read(os.path.join(wf_dir, name)).splitlines():
+                _s = _ln.strip()
+                _ind = len(_ln) - len(_ln.lstrip())
+                if _in_run and _s and _ind > _run_ind:
+                    if not _s.startswith("#"):
+                        ci_text += _s + "\n"
+                    continue
+                _in_run = False
+                if _s.startswith("run:") or _s.startswith("- run:"):
+                    ci_text += _s + "\n"
+                    _run_ind = _ind
+                    _in_run = _s.endswith("|") or _s.endswith(">") or _s.endswith("|-")
     if not wf_names:
         raise OSError("workflows 目录为空：" + wf_dir)
 
@@ -143,14 +156,28 @@ def gather_surfaces(repo: str) -> dict:
     }
 
 
+# [issue-129 patch] 整词匹配 + run-only 执行面
+def _word(text: str, token: str) -> bool:
+    """token 在 text 中以整词出现（两侧不得是名字字符）。"""
+    _wc = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+    i = text.find(token)
+    while i != -1:
+        before = text[i - 1] if i > 0 else ""
+        after = text[i + len(token)] if (i + len(token)) < len(text) else ""
+        if before not in _wc and after not in _wc:
+            return True
+        i = text.find(token, i + 1)
+    return False
+
+
 def classify(guard: str, sf: dict) -> tuple[str, str]:
     """返回 (状态, 依据串)。状态 ∈ covered_direct / covered_test / orphan。"""
     base = os.path.basename(guard)
     stem = base[:-3]  # 去掉 .py
-    if base in sf["gate_text"] or stem in sf["gate_text"]:
+    if _word(sf["gate_text"], base) or _word(sf["gate_text"], stem):
         return "covered_direct", "package.json gate/prepublishOnly 点名"
-    if base in sf["ci_text"] or stem in sf["ci_text"]:
-        return "covered_direct", "CI workflow 点名"
+    if _word(sf["ci_text"], base) or _word(sf["ci_text"], stem):
+        return "covered_direct", "CI workflow run 步骤点名"
     paired = "scripts/test_" + stem + ".py"
     if paired in sf["collected_tests"]:
         return "covered_test", "配对测试 " + paired + " 被 run_tests.py 收集（CI 跑它）"
