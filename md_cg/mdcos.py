@@ -3115,8 +3115,33 @@ class MdCGOS(MdCG):
             if item.get("actor"):
                 extra.setdefault("writer", item["actor"])
                 extra.setdefault("reviewer", self.actor)
-            nid = self.add(item["id"], content, layer=layer, tags=tags,
-                           condition_space=item.get("condition_space"), **extra)
+            # --- issue #165：加密级正文按**提案原始写入者**封装 ---------------
+            # 裁决者（如 review_cli 的 designer-cli）与提案者不同时，若按裁决者的
+            # DEK + AAD 封装，frontmatter 的 writer 仍写着提案者、密文却只有裁决者
+            # 能解 —— 提案者从此 get / recall 静默 not_found（下游症状）。取不到
+            # 提案者已登记的信封 ⇒ fail-closed：不落盘，提案保持 pending。
+            # 非加密级（internal/public）返回 None ⇒ _seal_override=None ⇒ 原路径，
+            # 既有行为逐位不变。
+            _seal_as = None
+            _psi = getattr(self, "_proposer_seal_identity", None)
+            if _psi is not None:
+                try:
+                    _seal_as = _psi(
+                        item.get("actor"),
+                        extra.get("sensitivity") or item.get("sensitivity"))
+                except crypto.LockedError as e:
+                    return {"ok": False, "error": "proposer_key_unavailable",
+                            "pid": pid, "writer": item.get("actor"),
+                            "detail": str(e)[:200],
+                            "hint": "加密级提案须按原写入者身份封装，但取不到"
+                                    "其数据密钥；未落盘，提案保持 pending。可由"
+                                    "原写入者身份裁决。"}
+            self._seal_override = ((item["id"],) + _seal_as) if _seal_as else None
+            try:
+                nid = self.add(item["id"], content, layer=layer, tags=tags,
+                               condition_space=item.get("condition_space"), **extra)
+            finally:
+                self._seal_override = None
             # 索引增量收尾（2026-09-16 取证）：add 只把条目放进本进程内存 _dirty，
             # 未达 autoflush(64) 阈值时进程退出即永久丢失——裁决进程（review_cli /
             # MCP op=review）通常只写 1~2 条，不 flush 则「节点在盘上但索引无条目」，
@@ -5311,13 +5336,33 @@ class MdCGSecure(MdCGOS):
                                      "reason": self._crypto_error or "no_dek"})
             raise crypto.LockedError(
                 f"{sens} 内容需加密，但当前无可用密钥（{self._crypto_error}）")
-        sealed = crypto.seal_node(content, self.dek, node_id,
-                                  self.principal.tenant, self.principal.actor)
-        crypto.audit(self.root, {"op": "seal", "node_id": node_id,
-                                 "sensitivity": sens,
-                                 "tenant": self.principal.tenant,
-                                 "actor": self.principal.actor})
+        # issue #165：裁决落盘时按**提案原始写入者**封装（override 由裁决分支置入，
+        # 仅对本次目标节点生效；不动读面、不新建信封、不改磁盘格式）。
+        actor, dek = self.principal.actor, self.dek
+        ov = getattr(self, "_seal_override", None)
+        if ov and ov[0] == node_id:      # 仅目标节点（防串到旁节点）
+            actor, dek = ov[1], ov[2]
+        sealed = crypto.seal_node(content, dek, node_id,
+                                  self.principal.tenant, actor)
+        rec = {"op": "seal", "node_id": node_id, "sensitivity": sens,
+               "tenant": self.principal.tenant,
+               "actor": self.principal.actor}
+        if actor != self.principal.actor:
+            rec["sealed_as"] = actor
+        crypto.audit(self.root, rec)
         return sealed
+
+    def _proposer_seal_identity(self, owner, sensitivity=None):
+        """裁决落盘时加密级正文应使用的封装身份（原写入者）；只用于封装，不用于读。
+
+        非加密级 / 无写入者 → None（走原路径，既有 public/internal 行为逐位不变）；
+        取不到写入者已登记的信封 → crypto.LockedError（由调用方 fail-closed 不落盘）。
+        """
+        owner = str(owner or "").strip()
+        if not owner or (sensitivity or DEFAULT_SENSITIVITY) not in crypto.ENCRYPTED_LEVELS:
+            return None
+        return owner, crypto.unwrap_dek(self.root, self.kek,
+                                        self.principal.tenant, owner)
 
 # 生效条件：content 为 None 或非加密时原样返回 content；加密时先用**本次读取所得的 frontmatter**（sensitivity/session）复核读可见性，不可见即写 read_denied 审计并返回 None；可见但 self.dek 为假值时写 read_locked 审计并返回 None；随后**无条件**调 crypto.open_node（唯一的完整性校验处）——成功即返回明文（指纹fp 是什么都不影响解密）；仅当抛 CryptoError 时才用**密文自带**的非敏感指纹 enc_id_fp 给这次失败分类：指纹有值且 ≠ 本方指纹 ⇒ 按采样写 read_foreign 审计（预期隔离）；否则写 open_failed 审计（真异常，含旧格式无指纹）。
     def _open_content(self, node_id, fm, content):
