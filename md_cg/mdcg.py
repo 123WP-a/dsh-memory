@@ -19,6 +19,7 @@ P0 风险（基线功能）：
 import os
 import re
 import json
+import sys
 import math
 import time
 import atexit
@@ -1636,6 +1637,47 @@ def _require_unit_number(field, value) -> float:
     return v
 
 
+# ---- issue #146③：密级行的**值域**判据（fail-closed，单一真源 = security）----
+# 病象：`sensitivity: "机密"`（类型对、值域错）能过 nodefile.frontmatter_problem
+# 的类型判据进索引；此后按「未知密级」消费时要么在 _rank 抛 AccessDenied 打断
+# 整条检索链，要么被当成默认档——后者等于把「密级声明坏掉」静默**降级为明文**。
+# 故在装载面就地 fail-closed：隔离该节点（不进索引、不改盘）。
+def _sensitivity_problem(value) -> str:
+    """密级行值域判据：None（未声明）合法；不在阶梯里 → 原因串（fail-closed）。
+
+    阶梯的**唯一真源**是 security.SENSITIVITY_ORDER——延迟导入，本模块不另抄
+    一份（第二份判据迟早与真源漂移）。返回空串 = 无问题。
+    """
+    if value is None:
+        return ""                # 缺省合法：存量节点本就不带该键
+    from .security import SENSITIVITY_ORDER
+    if value in SENSITIVITY_ORDER:
+        return ""
+    return ("密级损坏（fail-closed，不降级为明文）：sensitivity=%r 不在 %s"
+            % (value, list(SENSITIVITY_ORDER)))
+
+
+# ---- issue #146②：隔离的**可观测面**（单一实现点）-----------------------------
+# 隔离本身是「静默消失」：节点不进索引、盘面不改，使用者只会觉得「记忆少了」。
+# 故每次全量扫描后把隔离清单写 stderr（与 fsutil.note_* 同一条可观测纪律：
+# 容忍 ≠ 静默）；告警写失败被吞掉——告警面不得反向破坏装载路径。
+def _warn_quarantined(items) -> None:
+    """把本次扫描的隔离清单写 stderr；空清单不打噪声。"""
+    if not items:
+        return
+    try:
+        lines = ["[mdcg] 装载隔离告警：%d 个坏节点被隔离（不进索引、不改盘、"
+                 "盘面真源保留）" % len(items)]
+        for nid in sorted(items):
+            info = items.get(nid) or {}
+            lines.append("  隔离 %s：%s（%s）"
+                         % (nid, info.get("path") or "?",
+                            info.get("reason") or ""))
+        sys.stderr.write("\n".join(lines) + "\n")
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 # 生效条件：构造须传入 root，经 os.path.abspath 后以 exist_ok=True 创建该目录及 LAYERS 各层子目录；autoflush 无论取值（默认 64）都原样赋给实例。
 class MdCG:
 # 生效条件：root 传参即被 os.path.abspath 绝对化并 makedirs(exist_ok=True) 建立 root 与模块级 LAYERS 各层目录，autoflush（默认 64，含 0 等假值）原样存入 self.autoflush，随后 _load_index() 载入索引并以 _index_signature() 记录 _index.json 签名到 self._index_sig（跨进程读面代际感知的基线，P1b-2）、sweep_stale_temps(self.root) 清扫，并把 self 登记进模块级 _LIVE_CGS；
@@ -2250,6 +2292,14 @@ class MdCG:
                     # 只兜盘面既有脏数据——拒写与自愈各司其职。
                     nid = str(nid)
                     _rel = os.path.relpath(p, self.root).replace("\\", "/")
+                    # ①' 密级行**值域**判据（issue #146③，fail-closed）：类型判据只看
+                    #     「是不是 str」，值域判据看「是不是阶梯里的档」——密级声明
+                    #     坏掉的节点若被当默认档消费，等于**静默降级为明文**；故与
+                    #     ① 同路隔离（不进索引、不改盘，修好后下次扫描自动回归）。
+                    _sec_bad = _sensitivity_problem(fm.get("sensitivity"))
+                    if _sec_bad:
+                        quarantined[nid] = {"path": _rel, "reason": _sec_bad}
+                        continue
                     # ① 类型可用性判据（单点，nodefile.frontmatter_problem）
                     _prob = nodefile.frontmatter_problem(fm, content)
                     if _prob:
@@ -2267,6 +2317,8 @@ class MdCG:
                                       % (type(exc).__name__, str(exc)[:160])}
                         continue
         # 隔离清单**每次全量扫描都重建**（不累加）——扫描即盘面真相，上一次
+        self._quarantined = quarantined
+        _warn_quarantined(quarantined)
         # 被隔离的文件修好后本次自动回归索引（自愈腿，与 legacy P3 同向）。
         self._quarantined = quarantined
         # 索引序确定性：按 nid 排序返回。os.walk 的遍历序是**文件系统事实**
