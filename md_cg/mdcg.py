@@ -39,11 +39,11 @@ from .fsutil import (FileLock, ShardedLog, atomic_write, append_jsonl,
 # 处理（不再逐字符展开）；None / 空串按空列表（与改动前逐位一致）；其余可迭代
 # 仍 list(x)。
 def _ensure_list(x):
-    """归一成列表：None/空串 -> []；str -> [str]；其它可迭代 -> list(x)。"""
-    if x is None:
+    """归一成列表：任何假值（None/空串/0/False/[]）-> []；str -> [str]；其它可迭代 -> list(x)。"""
+    if not x:
         return []
     if isinstance(x, str):
-        return [x] if x else []
+        return [x]
     return list(x)
 
 # 五层 + 两类负记忆 + 目标槽（白箱记忆七件套工程化：事实/规则→knowledge；

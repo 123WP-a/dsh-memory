@@ -70,12 +70,12 @@ _NEG_PREFIX_RE = re.compile(r"[不没无别]\s*(?:怎么|太)*")
 
 
 def _neg_polarity(match_text: str, pred: str) -> bool:
-    """极性判定：谓词自带否定（讨厌/不喜欢）或前缀位出现否定标记 => 负面。"""
+    """极性判定：谓词自带否定（讨厌/不喜欢）或前缀位出现否定标记 => 负面。取首次出现（find）：谓词在宾语中再现时不误判。"""
     if not pred:
         return False                      # 非情感规则（无 p 组）：不带极性
     if pred in ("讨厌", "不喜欢"):
         return True
-    idx = match_text.rfind(pred)
+    idx = match_text.find(pred)
     if idx <= 0:
         return False
     return bool(_NEG_PREFIX_RE.search(match_text[:idx]))
