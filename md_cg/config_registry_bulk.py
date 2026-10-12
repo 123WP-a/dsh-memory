@@ -330,6 +330,7 @@ ENV_ROWS = [
     ('MDCG_FRESHNESS', 'TUNE', 'tune', 'env', True, 'None', 'str', 'on', 'MDCG_FRESHNESS', 'on', 'env_flag', 'md_cg/freshness.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）；有效缺省（盘点文字，未 AST 复核）：未设 = **开**（0/false/no/off 关）', 'unknown', ''),
     ('MDCG_SUSTAIN', 'TUNE', 'tune', 'env', True, "'1'", 'str', 'on', 'MDCG_SUSTAIN', 'on', 'env_literal', 'md_cg/mcp_server.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
     ('MDCG_HEARTBEAT_LEDGER', 'TUNE', 'tune', 'env', True, "'1'", 'str', 'on', 'MDCG_HEARTBEAT_LEDGER', 'on', 'env_literal', 'md_cg/sustain.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
+    ('MDCG_SUSTAIN_BEAT_THREAD', 'TUNE', 'tune', 'env', True, "'0'", 'str', 'on', 'MDCG_SUSTAIN_BEAT_THREAD', 'on', 'env_literal', 'md_cg/sustain.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
     ('PREDICTION_META_DIM', 'CALIB', 'calib', 'env', True, "'0'", 'str', 'value', 'PREDICTION_META_DIM', 'value', 'env_literal', 'md_cg/predict.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
     ('PREDICTION_META_PROXY', 'CALIB', 'calib', 'env', True, "'unmodeled_growth'", 'str', 'enum', 'PREDICTION_META_PROXY', 'enum', 'env_literal', 'md_cg/predict.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
     ('IMGSKILL_BACKEND', 'TUNE', 'tune', 'env', True, "'auto'", 'str', 'enum', 'IMGSKILL_BACKEND', 'enum', 'env_literal', 'md_cg/imgskill.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）', 'unknown', ''),
