@@ -392,13 +392,21 @@ def frontmatter_problem(fm, content=None) -> list:
         problems.append("%s 类型非法：期望 %s，实为 %s"
                         % (key, want, type(got).__name__))
 
-    # ① 下游直接 `.get()` 的映射字段：非 dict 即 AttributeError
-    #    （`(fm.get("condition_space") or {}).get(...)`）。
-    for _key in ("condition_space", "subgraph"):
+    # (1) 下游直接取映射的字段：非 dict 即 AttributeError
+    #     （(fm.get("condition_space") or {}).get(...)）。
+    for _key in ("condition_space",):
         _v = fm.get(_key)
         if _v is not None and not isinstance(_v, dict):
             _bad(_key, "dict", _v)
-    # ② 下游直接迭代/拼接的列表字段：str 会被逐字符迭代（静默错值）。
+    # (1)' subgraph 不是 dict-only：subgraph.declared() 兼容三种写法
+    #     （{nodes: [...]} / 纯 id 列表 / 内联对象列表）——list 形态是
+    #     合法的存量形态（md_cg 引用式写入即用 list）。只拒既非映射也
+    #     非序列的形态：写成 dict-only 会让 p8 的 subgraph=["a","b"]
+    #     被误判为损坏、整节点不可读（回归现场(2)）。
+    _v = fm.get("subgraph")
+    if _v is not None and not isinstance(_v, (dict, list, tuple)):
+        _bad("subgraph", "dict/list", _v)
+    # (2) 下游直接迭代/拼接的列表字段：str 会被逐字符迭代（静默错值）。
     for _key in ("tags", "non_applicable_conditions", "edges"):
         _v = fm.get(_key)
         if _v is not None and not isinstance(_v, (list, tuple)):
@@ -421,7 +429,12 @@ def frontmatter_problem(fm, content=None) -> list:
         if isinstance(_v, bool) or not isinstance(_v, (int, float)):
             _bad(_key, "number", _v)
     # ④ 下游按字符串消费的标量（`str` 之外的形态会静默变成 repr 文本）。
-    for _key in ("id", "layer", "role", "sensitivity", "verification_basis",
+    # id 不在此列：存量毒文件（旧版本 add(123) 写出 / 外部编辑器落下的
+    # id: 123）是 legacy P3 的自愈腿——_scan_nodes 一律 str(nid) 归一后
+    # 入索引（归一是消费点的职责）。此处判损坏会让该腿失效：毒节点从
+    # 索引里消失、经归一 id 也读不回（回归现场(1)）。写面拒写与读面自愈
+    # 各司其职，判据不越权。
+    for _key in ("layer", "role", "sensitivity", "verification_basis",
                  "writer", "session", "content_kind"):
         _v = fm.get(_key)
         if _v is not None and not isinstance(_v, str):

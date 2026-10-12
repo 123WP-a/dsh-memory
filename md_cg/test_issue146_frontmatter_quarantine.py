@@ -382,6 +382,16 @@ def main(argv=None) -> int:
         ok(nodefile.frontmatter_problem({"sensitivity": "internal",
                                          "depends_on": "a,b"}) == [],
            "F2e depends_on 的逗号串形态合法（不误判）")
+        # F2f/F2g 是本批修复的反向判据（补 negative）：判据写宽了会把
+        # 合法存量形态判成损坏，整节点从索引里消失——两条回归现场即此。
+        ok(nodefile.frontmatter_problem({"subgraph": ["a", "b"]}) == [],
+           "F2f 纯 id 列表形态的 subgraph 合法（引用式写入，勿误判）")
+        ok(nodefile.frontmatter_problem({"subgraph": {"nodes": ["a"]}}) == [],
+           "F2f2 映射形态的 subgraph 合法")
+        ok(nodefile.frontmatter_problem({"subgraph": "a,b"}) != [],
+           "F2f3 既非映射也非序列的 subgraph 仍判损坏")
+        ok(nodefile.frontmatter_problem({"id": 123}) == [],
+           "F2g 毒 id（id: 123）不判损坏——legacy P3 归一自愈腿")
     finally:
         nodefile.frontmatter_problem = _orig_problem
         MdCG._scan_nodes = _orig_scan
