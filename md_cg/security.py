@@ -69,6 +69,40 @@ def _rank(level: str) -> int:
         raise AccessDenied(f"未知敏感度/密级：{level}") from None
 
 
+# 生效条件：target_sensitivity / incoming_sensitivity 为 SENSITIVITY_ORDER 成员或 None
+# （None 按 DEFAULT_SENSITIVITY 处理）时，返回「把 incoming 内容的明文并入 target 节点
+# **是否导致该内容的有效密级下降**」＝ incoming 密级**严格高于** target 密级（合并后它按
+# target 的低档可见）；任一形参非法（_rank 抛 AccessDenied）时**按降密级处理**
+# （fail-closed：判不了就不许合并）。
+def merge_downgrades(target_sensitivity: str, incoming_sensitivity: str) -> bool:
+    """合并是否**降密级** —— 唯一判据单点（issue #148）。
+
+    病象：声明 private 的短记忆经 CONVERGE（writelimit.converge_into）或 MERGE
+    （forgetting.reinforce）**明文并入更早的 internal 节点**，而目标节点的
+    sensitivity **不变** ⇒ 该 private 明文就此获得 internal 的可见性（降密级泄漏，
+    访客可读）。
+
+    调用点：`writelimit.converge_into` / `forgetting.reinforce` —— 两者**落盘前**
+    一律经本函数，判为降密级即 **fail-closed 不写盘**；**不另写第二份判据**。
+
+    ★方向（本判据最易写反处，实测踩到过）：密级阶梯
+    public(0) < internal(1) < restricted(2) < private(3) < secret(4)；
+    病象是 **private(3) 并入 internal(1)** —— incoming 排名**更高**，合并后它只
+    按 internal 档被看见 ⇒ 该内容被**降级**。故判据为 `new > tgt`（不是 `<`）。
+
+    不适用条件：只判「incoming 密级高于目标 ⇒ 被降级」这一件事——同档合并照旧
+    放行；**低密级并入高密级节点**（incoming < target，内容变得更不可见）不在本
+    判据范围（非泄漏），仍由既有层闸/保护闸管；本函数不评价内容相关性、不替代
+    protect.guard_overwrite。
+    """
+    try:
+        tgt = _rank(target_sensitivity or DEFAULT_SENSITIVITY)
+        new = _rank(incoming_sensitivity or DEFAULT_SENSITIVITY)
+    except AccessDenied:
+        return True                      # fail-closed：判不了就不许合并
+    return new > tgt
+
+
 # 生效条件：全部形参均可省略、clearance 默认取模块常量 DEFAULT_SENSITIVITY，构造时先经 _rank(clearance) 校验，随后 session 为假值（含空串）回落为 sess_+uuid 十二位、role 假值回落 "system"、expires_at 为假值（含 0）置 None、layers_allow/ops_allow 为 None 时保持 None 否则转 tuple、theory_ok 经 bool() 转换。
 class Principal:
     """调用方身份（一次会话一个）。

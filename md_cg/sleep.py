@@ -474,9 +474,15 @@ def materialize(root: str = None, *, git_dir_path: str = None,
             return _busy("materialize", timeout)
         try:
             rep = ensure_repo(root, G)
-            init = _stage_and_commit(G, root, "sleep: 基线（真源面入册）") \
-                if not _has_head(G, root) else {"committed": False,
-                                                "reason": "已有基线提交"}
+            # #145①（2026-10-12 DSH 端）：**每轮都把真源面入册 lib.git**，不再只在首轮。
+            # 病象：修前 `if not _has_head(G, root)` ⇒ 首轮之后主库的编辑从不进版本库，
+            # 而影子是 `worktree add -b <branch> S BASE_BRANCH`（从**冻结基线** fork）
+            # ⇒ 影子拿到旧副本；本轮 merge 时旧副本被写回主库，**静默回滚**首轮之后的
+            # 编辑（实测：主库 v2 → 轮末回到 v1，且 ok=True、无冲突、无 deferred）。
+            # `_stage_and_commit` 自带「Δ 为空 ⇒ 零提交」幂等语义，故每轮调用安全。
+            init = _stage_and_commit(G, root, "sleep: 基线（真源面入册）")
+            # 基准提交＝本次入册后的 HEAD＝影子 fork 的起点（#145③ 写前复核用）
+            base_commit = _git_ok(G, root, "rev-parse", "HEAD").strip()
             if os.path.isdir(S):
                 r = _git(G, root, "worktree", "remove", "--force", S)
                 if r.returncode != 0:
@@ -513,6 +519,8 @@ def materialize(root: str = None, *, git_dir_path: str = None,
                 "git_dir": G, "shadow": S, "branch": branch,
                 "branch_reused": reused, "repo_created": rep["created"],
                 "baseline": init, "pathspecs": pathspecs(root),
+                # #145①：基准提交 + 基准水位（同一份读数，供 ③ 写前复核与三方比对）
+                "base_commit": base_commit, "base_face": after,
                 "lock": lock_path(), "source_face_delta": delta,
                 "source_face_count": len(after),
                 # §4.4 ① 的**基准水位**：物化这一刻的主库真源面内容哈希集合——
@@ -1054,6 +1062,15 @@ def gate_delta(cg_main, delta: dict, *, baseline_face: dict = None,
                                   "reason": ("主库在迭代期间改动过同一 id（或新增同名 id）"
                                              "——主库优先，本项挂起不自动解决")})
                 continue
+            # #145②（2026-10-12 DSH 端）· **三方比对（base / 影子 / 当前 main）**的落点说明：
+            # 修前本闸只比「base vs 当前 main」两方。我最初在此处按**内容哈希**补第三
+            # 方（影子文件 != base ⇒ 挂起），沙箱实测**误伤合法影子编辑**：影子迭代本来
+            # 就以「影子内容 ≠ base」为常态（实测 accepted 由 [a] 变 []，a 的影子版被挂起），
+            # 故**已回退**该形态。正解是比**影子分支的 fork 点**而不是内容：旧副本的成因
+            # 是「影子 fork 自更早的提交」，其 fork 点必然落后于基准提交——该判据落在
+            # `merge_cycle` 的写前复核（#145③：`merge-base HEAD <branch>` 必须等于当前
+            # HEAD，即等于 materialize 入册后的基准提交），既不误伤影子编辑、又掐住旧
+            # 副本进入重放的入口。此处保持两方读数不变（零回归）。
         # ④ 生命周期闸：非法迁移不得由睡眠周期写进主库。
         src = d.get("before_lifecycle") or "active"
         dst = d.get("after_lifecycle") or "active"
@@ -1215,6 +1232,23 @@ def merge_cycle(cg_main, root: str = None, *, git_dir_path: str = None,
             return {"ok": False, "busy": False, "lock_held": True,
                     "phase": "merge_cycle", "lock": lock_path(), "head": cur,
                     "error": "当前 HEAD 在 %s，merge 须在 %s 上执行" % (cur, BASE_BRANCH)}
+        # #145③（2026-10-12 DSH 端）：**写前复核**——影子必须 fork 自**当前 HEAD**。
+        # 影子陈旧（fork 点落后于 HEAD，例如两次物化之间主库被别的写方推进过）时
+        # 直接拒绝重放（保守路径），不让旧副本有写回主库的机会。
+        try:
+            _head = _git_ok(G, root, "rev-parse", "HEAD").strip()
+            _mb = _git_ok(G, root, "merge-base", "HEAD", branch).strip()
+        except Exception as _e:                                # noqa: BLE001
+            _head = _mb = ""
+        if _head and _mb and _mb != _head:
+            return {"ok": False, "busy": False, "lock_held": True,
+                    "phase": "merge_cycle", "lock": lock_path(), "branch": branch,
+                    "aborted": "stale_shadow", "head": _head[:12],
+                    "merge_base": _mb[:12],
+                    "error": "影子 fork 点 %s 落后于当前 HEAD %s ⇒ 影子是陈旧副本"
+                    % (_mb[:8], _head[:8]),
+                    "hint": ("#145③ 写前复核拒绝重放：请重新 materialize（会把主库真源面"
+                             "入册并据此重挂影子）后再合并")}
         rep = (replay_to_main(cg_main, S, delta or {}, accepted or [],
                               batch=batch) if replay
                else {"written": [], "skipped": [], "failed": [], "entries": []})

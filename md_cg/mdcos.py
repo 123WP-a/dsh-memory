@@ -2853,11 +2853,16 @@ class MdCGOS(MdCG):
                 if str(slot.get("primitive") or "") == "converge_into":
                     res = writelimit.converge_into(self, tgt, after,
                                                    override=_ovr, actor=actor,
-                                                   session=session)
+                                                   session=session,
+                                                   sensitivity=sens)
                 else:
+                    # #148（2026-10-12）：reinforce 落盘前的降密级 fail-closed 已就绪
+                    # （forgetting.py:552-558），此处必须把 incoming 密级接上，否则
+                    # 该路径拿不到 sensitivity ⇒ 判据失效、MERGE 降密级仍会落盘。
                     res = forgetting.reinforce(self, tgt, override=_ovr,
                                                actor=actor, content=after,
-                                               session=session)
+                                               session=session,
+                                               sensitivity=sens)
                 node_id = tgt
             elif act == _am.C_REWRITE:
                 # 补强（2026-10-02，复核观察 3）：C 的**目标节点在 accept 执行时
@@ -4573,7 +4578,10 @@ class MdCGOS(MdCG):
                        "merged_into": tgt, "gate": lim,
                        "converged": writelimit.converge_into(
                            self, tgt, content, override=override,
-                           actor=self.actor, session=_writer_session(self, kw))}
+                           actor=self.actor, session=_writer_session(self, kw),
+                           # #148（2026-10-12）：add-路径 CONVERGE 同款接线——
+                           # 缺此行则该路径拿不到 incoming 密级、降密级 fail-closed 失效。
+                           sensitivity=kw.get("sensitivity"))}
                 fv = "MERGE"
             elif lim["verdict"] == "DROP":
                 # 精确重复（与既有节点正文一致）：零新信息，交回旧闸门

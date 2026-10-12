@@ -499,7 +499,7 @@ def record_drop(cg, content, node_id, target=None, verdict=None, layer=None,
 
 # 生效条件：cg 与 node_id 必填，delta 默认 0.05，content 默认 None（不传即与改动前逐位一致：只改 frontmatter、正文原样写回）；cg.get(node_id) 抛异常或返回假值时返回 None；随后以节点真层/敏感度过 protect.guard_overwrite（层闸 + 保护闸，override 为真时先快照 + 审计）；imp 跨过 PROTECT_IMPORTANCE 即写 protected；content 非 None 时按 forgetting.aggregate_line 把「目标正文没有的」行追加为聚合行（零新增信息则不追加），session/actor 非空时按 forgetting.note_source 并列记归属；写盘后同步内存索引条目并**标脏**（cg._dirty[node_id]=e，推进读缓存代际与索引增量日志）；返回体带 content_sink（新正文去向：节点/行/行号）与 source（归属）。
 def reinforce(cg, node_id, delta=0.05, override=False, actor=None,
-              content=None, session=None):
+              content=None, session=None, sensitivity=None):
     """MERGE 的落库动作：不新增节点，把「又一次见到」折算成既有节点的强化。
 
     重要性 +delta，merge_count +1；一旦跨过 0.7 自动打上保护标记
@@ -545,6 +545,20 @@ def reinforce(cg, node_id, delta=0.05, override=False, actor=None,
     protect.guard_overwrite(cg, node_id, layer=fm.get("layer"),
                             sensitivity=fm.get("sensitivity"),
                             override=override, actor=actor)
+    # issue #148（C 组）**落盘前**判降密级（与 writelimit.converge_into 同一单点）：
+    # MERGE 会把 incoming 明文追加进既有节点，而目标节点 sensitivity 不变 ⇒ 低密级
+    # 明文获得目标档可见性（访客可读）。判为降密级即 fail-closed，不写盘、不标脏。
+    from .security import merge_downgrades as _merge_downgrades
+    if _merge_downgrades(fm.get("sensitivity"), sensitivity):
+        return {"ok": False, "error": "merge_downgrade_refused",
+                "node_id": node_id,
+                "target_sensitivity": fm.get("sensitivity"),
+                "incoming_sensitivity": sensitivity,
+                "detail": "合并会降低该内容的有效密级（incoming 密级**高于**目标节点"
+                          "密级 ⇒ 合并后只按目标档可见）——fail-closed 未写盘："
+                          "高密级明文不得并入低密级节点。",
+                "hint": "如需保留该内容：确认其确为该档后以不高于目标节点密级的声明"
+                        "重新写入，或新建独立节点（add，保持其声明密级）。"}
     imp = min(1.0, float(fm.get("importance") or 0.5) + delta)
     fm["importance"] = imp
     fm["merge_count"] = int(fm.get("merge_count") or 0) + 1

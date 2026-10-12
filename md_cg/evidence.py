@@ -55,6 +55,15 @@ SOURCE_PREFIX = "source:"
 MAX_ITEMS = 500              # 单包条目上限（防灌包）
 MAX_TEXT = 4000              # 单条正文上限
 
+# ---- issue #147（2026-10-11）：pack_id 白名单 ----
+# 病象：pack_id 未清洗即拼进归档路径（见 write_pack 缺省分支）⇒ 路径穿越；
+# 非管理员令牌**一次 import 即可覆写** _keys.json / _tokens.json（实测 k=5 段 ../ 命中）。
+# 合法生产者只产 "pack-<12hex>"（见 export_pack「pack["pack_id"] = "pack-" + pid」），
+# 故白名单取 ASCII 字母数字与 . _ -，并显式拒 .. 与前导点。
+PACK_ID_MAX = 128
+PACK_ID_OK = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
 
 class EvidenceError(Exception):
     """跨节点证据层错误（fail-closed）。"""
@@ -295,8 +304,26 @@ def export_pack(cg, *, subjects=None, since=None, swarm: str = None,
 def write_pack(pack: dict, path: str = None, swarm: str = None) -> dict:
     """把证据包落盘到收件箱（或指定路径）。"""
     if not path:
+        # issue #147 **汇点兜底**：与 _validate 同源的白名单——即使调用方绕过
+        # import_pack（直接调本函数），恶意 pack_id 也一律 fail-closed，
+        # 且异常类型统一为 EvidenceError（不再漏成 OSError/ValueError）。
+        perr = _pack_id_error(pack.get("pack_id"))
+        if perr:
+            raise EvidenceError(perr)
+        base = os.path.realpath(inbox_dir(swarm))
         path = os.path.join(inbox_dir(swarm),
                             f"{_slug(pack.get('from_node'))}__{pack.get('pack_id')}.json")
+        # issue #147（2026-10-11）：归档目标必须落在收件箱根内——realpath 归一后判
+        # 包含性，越界即 fail-closed（拒 ../ 穿越、绝对路径、盘符、UNC、空字节）。
+        # 只约束**由 pack 数据派生**的缺省路径；显式 path 是调用方（CLI --out /
+        # MCP out）自选落点，属 API 层调用者权限，不在此收窄（既有调用面两处）。
+        try:
+            real = os.path.realpath(path)
+        except ValueError as exc:                    # 空字节等非法字符
+            raise EvidenceError(f"证据包归档路径非法：{exc}")
+        if real != base and not real.startswith(base + os.sep):
+            raise EvidenceError(
+                f"证据包归档路径越界（必须落在收件箱内）：{path!r}")
     _write_json(path, pack)
     return {"ok": True, "file": path}
 
@@ -313,7 +340,23 @@ def _read_pack(src) -> dict:
         return json.load(f)
 
 
-# 生效条件：当 pack 为 dict 且 kind 等于常量 KIND、int(pack.get("schema") or 0) 不大于常量 SCHEMA、from_node strip 后非空、items 为 list 时返回空字符串；否则按序返回对应错误字符串（非 dict、kind 不符、schema 过新、缺 from_node、缺 items）。
+# 生效条件：pid 为 pack["pack_id"]（任意类型）；合规返回空字符串，否则返回中文理由——非 str/空、超 PACK_ID_MAX、含 PACK_ID_OK 之外字符、以点开头或含连续两点各一条。**单一真源**：_validate 与 write_pack 汇点共用本函数，规则只有一份。
+def _pack_id_error(pid) -> str:
+    """pack_id 白名单判据（issue #147）。"""
+    if not isinstance(pid, str) or not pid:
+        return "证据包缺少 pack_id（归档不可命名）"
+    if len(pid) > PACK_ID_MAX:
+        return f"证据包 pack_id 过长：{len(pid)} > {PACK_ID_MAX}"
+    bad_ch = sorted({ch for ch in pid if ch not in PACK_ID_OK})
+    if bad_ch:
+        return (f"证据包 pack_id 含非法字符 {bad_ch}"
+                f"（只允许字母数字与 . _ -）：{pid!r}")
+    if pid.startswith(".") or ".." in pid:
+        return f"证据包 pack_id 形似路径（拒 .. 与前导点）：{pid!r}"
+    return ""
+
+
+# 生效条件：当 pack 为 dict 且 kind 等于常量 KIND、int(pack.get("schema") or 0) 不大于常量 SCHEMA、from_node strip 后非空、items 为 list、且 _pack_id_error(pack.get("pack_id")) 为空时返回空字符串；否则按序返回对应错误字符串（非 dict、kind 不符、schema 过新、缺 from_node、缺 items、pack_id 不合法）。
 def _validate(pack: dict) -> str:
     if not isinstance(pack, dict):
         return "证据包不是 JSON 对象"
@@ -325,7 +368,8 @@ def _validate(pack: dict) -> str:
         return "证据包缺少 from_node（来源不可溯）"
     if not isinstance(pack.get("items"), list):
         return "证据包缺少 items"
-    return ""
+    # issue #147：pack_id 进归档文件名 ⇒ 必须过白名单（拒穿越/绝对路径/盘符/UNC/空字节）。
+    return _pack_id_error(pack.get("pack_id"))
 
 
 # 生效条件：当传入 from_node 和 orig 时，返回 f"xnode_{_slug(from_node)}_{_slug(orig)}"。
@@ -414,7 +458,11 @@ def import_pack(cg, src, *, subsystem: str = SUBSYSTEM, swarm: str = None,
     if archive:
         try:
             archived = write_pack(pack, swarm=swarm)["file"]
-        except OSError:
+        except (OSError, EvidenceError):
+            # issue #147：归档越界（EvidenceError，realpath 兜底）与写盘失败
+            # 同等处理——**不逃逸**。修前只捕 OSError：pack_id 带空字节时
+            # open()/realpath 抛的 ValueError 会**逸出 import_pack**（实测），
+            # 调用方只见崩溃且无留痕；现一并收口。
             archived = ""
     return {"ok": True, "from_node": from_node, "pack_id": pack.get("pack_id"),
             "imported": len(written), "skipped": skipped,

@@ -129,7 +129,7 @@ def _push_rate(st: dict, key: str, now: float) -> None:
 
 # 生效条件：仅当 layer=="contextual" 且 enabled() 为真、且 importance_hint 为 None 或 float(importance_hint)<0.7（转换抛 TypeError/ValueError 时同样继续）才进入限流，此时 now 为 None 取 time.time()，key 取 f"{layer}:{role or 'user'}"（role 为 None/空串等假值回落 'user'）：同 key 窗口内条数 ≥ RATE_MAX 返回 DEFER；否则 signature 非空且 st["sigs"] 中该签名记录在 CONVERGE_WINDOW 内、nid 有效且 cg.get(rec["nid"]) 存在时，正文 strip 后完全一致返回 DROP、不一致返回 CONVERGE；其余情形返回 None 放行。
 def check(cg, content, layer="contextual", role=None, node_id=None,
-          importance_hint=None, now=None):
+          importance_hint=None, now=None, sensitivity=None):
     """remember_gated 前置限流。None=放行；否则 {"verdict": DEFER|CONVERGE}。
 
     - DEFER：同 (layer, role) 滑动窗口内已满 RATE_MAX 条（被拒者也计数，
@@ -183,17 +183,23 @@ def check(cg, content, layer="contextual", role=None, node_id=None,
                 _save(cg, st)
                 return {"verdict": "CONVERGE", "limiter": "converge",
                         "target": rec["nid"], "sig": sig[:40], "n": rec["n"],
+                        # issue #148：把两侧密级带出闸门，供审计与上层判据复用
+                        # （真正的拒绝判据仍只在 security.merge_downgrades 单点）。
+                        "target_sensitivity":
+                            (tgt.get("frontmatter") or {}).get("sensitivity"),
+                        "incoming_sensitivity": sensitivity,
                         "reason": f"converge:{sig[:40]}#{rec['n']}"}
         st["sigs"][sig] = {"nid": node_id, "t": now, "n":
                            int((rec or {}).get("n") or 1),
-                           "sk": sig[:60]}
+                           "sk": sig[:60],
+                           "sens": sensitivity}      # issue #148：声明密级随签名记账
     _push_rate(st, key, now)
     _save(cg, st)
     return None
 
 
 # 生效条件：形参 content 的 template_signature 非空，且 st["sigs"].get(sig) 为 None 或该记录 nid 为假值时，写入 {"nid": node_id, ...} 并保存；否则不写并返回 None；
-def record_accepted(cg, node_id, content, now=None) -> None:
+def record_accepted(cg, node_id, content, now=None, sensitivity=None) -> None:
     """ACCEPT 落盘后确保签名→节点映射存在（check 已预占位，此处兜底）。"""
     sig = template_signature(content)
     if not sig:
@@ -203,13 +209,14 @@ def record_accepted(cg, node_id, content, now=None) -> None:
     rec = st["sigs"].get(sig)
     if rec is None or not rec.get("nid"):
         st["sigs"][sig] = {"nid": node_id, "t": now, "n":
-                           int((rec or {}).get("n") or 1), "sk": sig[:60]}
+                           int((rec or {}).get("n") or 1), "sk": sig[:60],
+                           "sens": sensitivity}      # issue #148：声明密级随签名记账
         _save(cg, st)
 
 
 # 生效条件：cg.get(target) 为假值返回 {"ok": False, "error": "target_missing"}；随后以节点真层/敏感度过 protect.guard_overwrite（层闸 + 保护闸，override 为真时先快照 + 审计）；通过后按 forgetting.aggregate_line（单点）把新正文里目标还没有的行追加为聚合行、fm["merge_count"]=int(fm.get("merge_count") or 0)+1 后 _write_node 落盘（重要性不变），并把 session/actor 归属并列记进 fm（forgetting.note_source）；返回 {"ok": True, "merge_count": 新值, "content_sink": 去向, "source": 归属}。
 def converge_into(cg, target: str, content: str, override=False, actor=None,
-                  session=None) -> dict:
+                  session=None, sensitivity=None) -> dict:
     """同构聚合落库：正文追加一行【聚合】摘要，merge_count+1。
 
     importance **不变**——流水不该越聚越重要（与 forgetting.reinforce
@@ -239,6 +246,21 @@ def converge_into(cg, target: str, content: str, override=False, actor=None,
     protect.guard_overwrite(cg, target, layer=fm.get("layer"),
                             sensitivity=fm.get("sensitivity"),
                             override=override, actor=actor)
+    # issue #148（C 组）**落盘前**判降密级：声明密级低于目标节点密级的合并，会把
+    # 低密级明文写进高密级节点，而目标 frontmatter 的 sensitivity 不变 ⇒ 明文获得
+    # 目标档的可见性（访客可读）。判据走**唯一单点** security.merge_downgrades；
+    # 判为降密级即 fail-closed **不写盘**（不追加聚合行、不动 merge_count、不标脏）。
+    from .security import merge_downgrades as _merge_downgrades
+    if _merge_downgrades(fm.get("sensitivity"), sensitivity):
+        return {"ok": False, "error": "merge_downgrade_refused",
+                "target": target,
+                "target_sensitivity": fm.get("sensitivity"),
+                "incoming_sensitivity": sensitivity,
+                "detail": "合并会降低该内容的有效密级（incoming 密级**高于**目标节点"
+                          "密级 ⇒ 合并后只按目标档可见）——fail-closed 未写盘："
+                          "高密级明文不得并入低密级节点。",
+                "hint": "如需保留该内容：确认其确为该档后以不高于目标节点密级的声明"
+                        "重新写入，或不走 CONVERGE 而新建独立节点（add，保持其声明密级）。"}
     # 延迟导入：forgetting 是聚合行/归属的单点实现（writelimit 不反向被它依赖，
     # 无环）；放函数内避免模块导入期把 md_cg.forgetting 的依赖面（mdcg/bigrams）
     # 拉进本模块的加载链。
