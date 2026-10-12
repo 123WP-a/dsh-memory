@@ -1442,11 +1442,11 @@
    "line_text": "| 2026-10-07 会话轮 25 | — | **v1.1 第 3 组完成（结构面四项取证）**：探针 `scripts/probe_w7v11_struct_limited.py`（只读；三子命令 fastpath／layers／sustain，库根经 `--root`／`MDCG_ROOT` 传入）＋取证文档…"
   },
   {
-   "key": "docs/plans/真源索引_通用机制_v0.3.md#033c8a93ff9794cc -> refindex.py:520",
+   "key": "docs/plans/真源索引_通用机制_v0.3.md#0b19c6635132c0b4 -> refindex.py:565",
    "why": "活文档面（docs/plans）存量手写锚：本次审计仅把 33 条界到「确凿」，其余不在本次改动面内 → 冻结（非「通过」；建议同法改符号锚）。",
-   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:46 -> refindex.py:520",
+   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:46 -> refindex.py:565",
    "head_line": 46,
-   "line_text": "| 按区间**回读真源**（单点） | `read_ref(ref, root=…)` → ok/stale/dangling + `text`（`refindex.py:520`） |"
+   "line_text": "| 按区间**回读真源**（单点） | `read_ref(ref, root=…)` → ok/stale/dangling + `text`（`refindex.py:565`） |"
   },
   {
    "key": "docs/plans/真源索引_通用机制_v0.3.md#28a03da45368f334 -> md_cg/logref.py:119-128",
@@ -1456,11 +1456,11 @@
    "line_text": "「区间哈希 + 行位全等」承担（`md_cg/logref.py:119-128` 自陈：`hash` 与 `lineno/end`"
   },
   {
-   "key": "docs/plans/真源索引_通用机制_v0.3.md#3d787e58d27eba42 -> refindex.py:445",
+   "key": "docs/plans/真源索引_通用机制_v0.3.md#e71a7c4e2f238edd -> refindex.py:490",
    "why": "活文档面（docs/plans）存量手写锚：本次审计仅把 33 条界到「确凿」，其余不在本次改动面内 → 冻结（非「通过」；建议同法改符号锚）。",
-   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:43 -> refindex.py:445",
+   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:43 -> refindex.py:490",
    "head_line": 43,
-   "line_text": "| 统一 ref 协议（指向真源的指针） | 节点 frontmatter `code_ref` / `doc_ref`（path / root / heading / level / lineno / end / anchor / **hash**）——`refindex.py:445` 与 `refindex.py…"
+   "line_text": "| 统一 ref 协议（指向真源的指针） | 节点 frontmatter `code_ref` / `doc_ref`（path / root / heading / level / lineno / end / anchor / **hash**）——`refindex.py:490` 与 `refindex.py:504` 两组 `_ref()` 构造 |"
   },
   {
    "key": "docs/plans/真源索引_通用机制_v0.3.md#5b48ab365ef4fa99 -> md_cg/srcindex.py:86",
@@ -1484,11 +1484,11 @@
    "line_text": "| 统一的索引节点 id（**路径-标题寻址**，位置化） | `docindex.node_id(it)` / `codeindex.node_id(it)`（`refindex.add_items` 内统一调用）；要**内容寻址**的参照是 `srcindex.src_id` 的 `file_hash`（`md_c…"
   },
   {
-   "key": "docs/plans/真源索引_通用机制_v0.3.md#c03f5b37b35c7fb2 -> docindex.py:297-298",
+   "key": "docs/plans/真源索引_通用机制_v0.3.md#921f8dc5e6ff2be7 -> docindex.py:297-298",
    "why": "活文档面（docs/plans）存量手写锚：本次审计仅把 33 条界到「确凿」，其余不在本次改动面内 → 冻结（非「通过」；建议同法改符号锚）。",
-   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:94 -> docindex.py:297",
+   "legacy_key": "docs/plans/真源索引_通用机制_v0.3.md:94 -> docindex.py:297-298",
    "head_line": 94,
-   "line_text": "| **D3** | dup 后缀（`docindex.py:297-298`）是位置化键的补丁 | 插 / 删同标题章节 ⇒ 该文档 id 全量重算，旧代靠 `prune_orphans`（`refindex.py:784`）清退；幂等性靠「同 id 原子覆盖 + 旧代清退」，不靠 id 稳定 |"
+   "line_text": "| **D3** | dup 后缀（`docindex.py:297-298`）是位置化键的补丁 | 插 / 删同标题章节 ⇒ 该文档 id 全量重算，旧代靠 `prune_orphans`（`refindex.py:829`）清退；幂等性靠「同 id 原子覆盖 + 旧代清退」，不靠 id 稳定 |"
   },
   {
    "key": "docs/plans/睡眠与自迭代_功能优化设计_v0.4.md#03bcc3f090c50257 -> md_cg/protect.py:135-151",
