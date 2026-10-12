@@ -3376,6 +3376,15 @@ class MdCGOS(MdCG):
                                           "actor": self.actor,
                                           "trash": os.path.relpath(dst, self.root)
                                                    .replace("\\", "/")})
+        # issue143-FIX(item3)：软删也进遗忘审计——forget 是唯一不可逆动作，此前
+        # 只写 _deletions.jsonl，_forgetting.jsonl 零增长（docstring 承诺「一切裁决
+        # 都写进 _forgetting.jsonl」未兑现）。新增第五态 verdict="FORGET"，summary()
+        # 的 by_verdict 为任意键计数，无需改动；既有行形状不变。
+        forgetting.log(self, {"t": time.time(), "node_id": node_id,
+                              "layer": e.get("layer"),
+                              "verdict": "FORGET", "reason": reason,
+                              "actor": self.actor, "tombstone": h,
+                              "ledger": "_deletions.jsonl"})
         # 摘索引必须**落盘**（写删除记录）：只 pop 内存会让条目在下次启动
         # 重放 _index_log 时复活成幽灵条目（索引有条目、文件已进 trash/）。
         self._unstage(node_id)
@@ -4730,6 +4739,10 @@ class MdCGOS(MdCG):
                                     node_id=node_id)
         v = verdict["verdict"]
         out = {"verdict": v, "node_id": node_id, "gate": verdict}
+        # issue143-FIX(item1)：落盘=裁决值收口到四态分派之前——DEFER 经审查队列
+        # 往返后仍须带裁决真分与来源，不得回落 add 缺省 0.5 / importance_source=None。
+        kw["importance"] = verdict["importance"]["score"]
+        kw["importance_source"] = verdict["importance"]["from"]
         if v == "ACCEPT":
             # issue50-d（2026-10-02）：**落盘=裁决值**。此前「hint 非 None 才
             # 透传」的口径把启发式裁决值全部丢在闸门上——隔离沙箱实证：
