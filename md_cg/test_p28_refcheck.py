@@ -460,7 +460,7 @@ DOC_SEC_HEAD = "### 3.1 "
 #: §3.1（归一化后）的 sha1 前 16 位：**判据侧陈化硬失败**——口径一被改写（无论改真源
 #: 还是改守卫）就必须同步本行，才谈得上「措辞与实现同源」。归一化＝空白折叠 ⇒ 换行 /
 #: 缩进 / 表格对齐**不**误红，只有措辞变化才红。失败信息里打印现算值，照抄即恢复。
-DOC_SEC_FP = "57171a2ea936f4c2"
+DOC_SEC_FP = "5e1c5e8bc53dabdf"
 
 #: §3.1 里必须**逐字**出现的口径字面（缺一条 ⇒ 措辞已从实现侧漂开）。
 DOC_REQUIRED = (
@@ -482,7 +482,7 @@ DOC_CITATIONS = (
      "got = codeindex.region_hash(lines, lineno, end)"),
     ("refindex.py:565", "md_cg/refindex.py", 565, "def read_ref("),
     ("refindex.py:633", "md_cg/refindex.py", 633, "def check_refs("),
-    ("refindex.py:829", "md_cg/refindex.py", 829, "def prune_orphans("),
+    ("refindex.py:830", "md_cg/refindex.py", 830, "def prune_orphans("),
     ("srcindex.py:71", "md_cg/srcindex.py", 71, "def src_id("),
     ("srcindex.py:86", "md_cg/srcindex.py", 86, "def file_hash("),
     ("logref.py:119", "md_cg/logref.py", 119, "def node_state("),
