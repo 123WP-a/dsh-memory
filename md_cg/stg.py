@@ -528,7 +528,7 @@ def _env_session_authority():
     return _normalize_session(raw)
 
 
-# 生效条件：session 为 None 或 str(session).strip() 为空串时返回 ""（跨会话视图的内部表示，与旧实现 `"" if session is None else str(session).strip()` 逐位一致）；去空白后恰为 "*" 时返回 "*"；否则**先判「声明是否可核验」**：延迟导入 mcp_server._normalize_session 得归一值 n，n 不等于 `anonymous`（可核验）时返回 n——它是指名读视图，env 不得改写；n 恰为 `anonymous`（不可核验：DSH 形态而会话根下无此会话）且 env 权威（MDCG_SESSION 优先，退回 DSH_SESSION_ID；与写侧 _declared_session 同源，见 _env_session_authority）在场时返回 env 值（#128 原场景），否则返回 n；该导入抛任何异常（ImportError 等）时返回去空白原值（fail-soft 退回旧行为）。
+# 生效条件：session 为 None 或 str(session).strip() 为空串时返回 ""（跨会话视图的内部表示，与旧实现 `"" if session is None else str(session).strip()` 逐位一致）；去空白后恰为 "*" 时返回 "*"；否则**先查 env 权威**（MDCG_SESSION 优先，退回 DSH_SESSION_ID；在场即返回其归一值——与写侧 _declared_session 同源，见 _env_session_authority），无 env 权威时延迟导入 mcp_server._normalize_session 并返回其归一结果；该导入抛任何异常（ImportError 等）时返回去空白原值（fail-soft 退回旧行为）。
 def _view_session(session):
     """读侧会话视图值 → 过滤值：**与写侧同一把尺**（H2，2026-09-30；#128 补 env 权威）。
 
@@ -543,16 +543,13 @@ def _view_session(session):
     env（`MDCG_SESSION` / `DSH_SESSION_ID`）在场时**丢弃请求声明**（环境权威，
     客户端不得改写归属），读侧此前**只过 `_normalize_session`**——请求声明
     （如 DSH 进程 UUID）被归一后与落盘的 env 值不等 ⇒ 本会话视图恒 0 条。
-    现读侧把 env 权威**收窄为「声明不可核验」时的兜底**（P47 修复，2026-10-12）：
-    可核验的具体会话值原样采用——那是调用方点名的**读视图**，改写它属越界。
+    现读侧同用写侧那套 env 权威判定：env 在场时把请求 `session` 归到 env 值。
     **不放开授权面**（session 只是归因/视图维度，见 `timeline`）。
 
     由此本函数**只归一「具体会话值」这一态**，三态语义逐位不变：
       · None / 空串 → 跨会话（缺省不过滤，向后兼容）；
       · `"*"`       → 跨会话（显式意图；`"*"` 不是会话名，**不归一**）；
-      · 其它值      → **可核验**（`_normalize_session` 归一后 ≠ `anonymous`）用该值本身——它是指名读视图，
-        env 不得改写；**不可核验**（归一为 `anonymous`，即 DSH 形态而会话根下无此会话）
-        时 env 权威在场则用 env 值（#128 原场景），否则用归一值。
+      · 其它值      → env 权威在场时归到 env 值；否则过 `_normalize_session`。
 
     真源只有一份（`mcp_server._normalize_session`），此处**消费而不重写**：
     写侧读侧各写一份校验必然造出第三种不等值。延迟导入的副作用为零——正常
@@ -574,27 +571,25 @@ def _view_session(session):
     if s in ("", "*"):
         return s
     env = _env_session_authority()
+    if env is not None:
+        return env            # env 权威：请求声明归到 env（与写侧同一归属）
     try:
         from .mcp_server import _normalize_session
     except Exception:                          # noqa: BLE001  fail-soft：保旧行为
-        return env if env is not None else s
-    n = _normalize_session(s)
-    if env is not None and n == "anonymous":
-        return env            # 声明不可核验（DSH 形态但会话根下无此会话）⇒ env 权威（#128）
-    return n
+        return s
+    return _normalize_session(s)
 
 
-# 生效条件：session 为 None / 去空白为空串 / 恰为 "*" 时返回 False（跨会话视图不构成「丢弃声明」）；否则 env 权威（MDCG_SESSION 优先，退回 DSH_SESSION_ID）不在场时返回 False，在场时仅当 _normalize_session(请求值) 归一为 `anonymous`（声明不可核验：DSH 形态而会话根下无此会话）时返回 True——即请求声明确实被丢弃（只做回报，不改语义）；归一导入失败等异常一律 False（fail-soft）。
+# 生效条件：session 为 None / 去空白为空串 / 恰为 "*" 时返回 False（跨会话视图不构成「丢弃声明」）；否则 env 权威（MDCG_SESSION 优先，退回 DSH_SESSION_ID）在场且 _normalize_session(请求值) 不等于 env 归一值时返回 True——即请求声明确实被丢弃（只做回报，不改语义）。
 def _session_declaration_ignored(session):
     """请求声明是否因 env 权威被丢弃（issue #128 第 3 项：**只做回报**）。
 
-    口径（env 权威是既有契约，但 P47 起只作用在**声明不可核验**时，见 `_declared_session` docstring）：仅把
+    语义一字不改（env 权威是既有契约，见 `_declared_session` docstring）：仅把
     「接受参数、静默替换」的假装成功形态消除——调用方在返回体里看得见
     `session_declaration_ignored: true`，知道自己的声明没生效、生效的是 env 值。
 
-    仅当声明**确实被丢弃**（env 在场 ∧ 请求声明**不可核验**：归一后为 `anonymous`）才为真：
-    可核验的声明（归一后非 `anonymous`）在任何 env 之下都原样生效，没有任何信息丢失，不报
-    （防噪声）；env 不在场时恒 False（不存在「被丢弃」这回事）。
+    仅当声明**确实被丢弃**（env 在场 ∧ 归一后请求值与 env 值不等）才为真：
+    env 值与请求值相同时没有任何信息丢失，不报（防噪声）。
     """
     if session is None:
         return False
@@ -607,11 +602,11 @@ def _session_declaration_ignored(session):
     try:
         from .mcp_server import _normalize_session
     except Exception:                          # noqa: BLE001  fail-soft
-        return False
-    return _normalize_session(s) == "anonymous"
+        return s != env
+    return _normalize_session(s) != env
 
 
-# 生效条件：以 _scan(cg,layer=layer) 为候选（全部 layer/可见性命中），session 经 _view_session 归一后（None/空/"*"=跨会话不过滤，其它值=可核验时用该值本身、不可核验时 env 权威在场则用 env 值（#128）否则用 _normalize_session 归一值）非跨会话时仅保留 frontmatter.session 精确相等的节点，_interval(n["frontmatter"], time_axis) 为 None 的节点被跳过——**条件命中集到此确定**；随后才截断：命中集超过 max_scan（默认 5000 不变）时按 (start,end,id) 时间倒序保留近期 max_scan 条并标记 truncated；保留集按 (start,end,id) 以 reverse=bool(desc) 排序，返回 count=条件命中总数（截断前，**不再受索引切片影响**）、limit=传入 limit、session=生效的会话过滤值（跨会话时为 None）、scanned=候选遍历数、kept=截断后保留数、truncated=截断标记（截断时另有 hint）、items 为排序后前 limit 项（limit=0 时为空列表）且每项附 session 归属与 _preview(cg,id)（time_axis 缺省 observed，与旧行为逐位一致；非法轴抛 ValueError）；请求声明确被 env 权威丢弃时额外带 session_declaration_ignored=True（issue #128：只回报不改语义）。
+# 生效条件：以 _scan(cg,layer=layer) 为候选（全部 layer/可见性命中），session 经 _view_session 归一后（None/空/"*"=跨会话不过滤，其它值=env 权威在场时归到 env 值、否则 _normalize_session 归一后的具体会话）非跨会话时仅保留 frontmatter.session 精确相等的节点，_interval(n["frontmatter"], time_axis) 为 None 的节点被跳过——**条件命中集到此确定**；随后才截断：命中集超过 max_scan（默认 5000 不变）时按 (start,end,id) 时间倒序保留近期 max_scan 条并标记 truncated；保留集按 (start,end,id) 以 reverse=bool(desc) 排序，返回 count=条件命中总数（截断前，**不再受索引切片影响**）、limit=传入 limit、session=生效的会话过滤值（跨会话时为 None）、scanned=候选遍历数、kept=截断后保留数、truncated=截断标记（截断时另有 hint）、items 为排序后前 limit 项（limit=0 时为空列表）且每项附 session 归属与 _preview(cg,id)（time_axis 缺省 observed，与旧行为逐位一致；非法轴抛 ValueError）；请求声明确被 env 权威丢弃时额外带 session_declaration_ignored=True（issue #128：只回报不改语义）。
 def timeline(cg, layer=None, limit=50, desc=True, max_scan=5000,
              time_axis="observed", session=None):
     """按时间排序的节点列表。`time_axis` 决定排序依据的时间区间（见 `_interval`）。
