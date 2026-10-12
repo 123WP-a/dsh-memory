@@ -252,8 +252,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="CSRE 条件空间路由引擎")
     ap.add_argument("--build", action="store_true")
-    ap.add_argument("--db", default=os.path.join(ROOT := HERE.rsplit(os.sep, 2)[0]
-                                                 if False else os.path.dirname(
+    ap.add_argument("--db", default=os.path.join(ROOT := os.path.dirname(
                                                      os.path.dirname(os.path.abspath(__file__))),
                                                  "aeis", "wisdom",
                                                  "wisdom-book-cloud.db"))

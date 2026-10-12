@@ -215,7 +215,7 @@ def main():
             cg._like = _saved_like
         ok(m_rv2.get("reach") == "reverted" and m_rv2.get("reach_build_docs") is not None,
            "(5b) 回退时若发生重建，首建成本字段必须保留",
-           f"reach={m_rv2.get(chr(39)+chr(39)) if False else m_rv2.get('reach')} build={m_rv2.get('reach_build_docs')}")
+           f"reach={m_rv2.get('reach')} build={m_rv2.get('reach_build_docs')}")
 
         # ---------------- (6) 缓存失效 ----------------
         print("\n(6) 缓存失效（新增节点后仍可召回）")

@@ -1154,8 +1154,6 @@ def chat(dex, message, session_id="default", memory=None, prefeed_fn=None,
         _vmeta = {"kind": _vkind, "hits": hits}
         _vok, _vchecks = _va(reply, _vmeta)
         if not _vok:
-            import traceback as _tb
-            _tb.print_exc() if False else None
             _fail = "；".join(c for c in _vchecks if c.startswith("✗"))
             # 记日志（stderr 便于排查），输出诚实声明
             import sys as _sys

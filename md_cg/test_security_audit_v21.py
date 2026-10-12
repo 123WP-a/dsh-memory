@@ -116,8 +116,7 @@ def v21_4_run_channel_b():
     import json as _json
     smoke = tempfile.mkdtemp(prefix="v21_4_chain_")
     m.STATE = smoke                          # 隔离状态目录
-    good = ("def冒烟排序" if False else
-            "def mao_yan_sort(arr):\n"
+    good = ("def mao_yan_sort(arr):\n"
             "    n = len(arr)\n"
             "    for i in range(n):\n"
             "        for j in range(0, n - i - 1):\n"
