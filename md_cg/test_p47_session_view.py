@@ -20,6 +20,9 @@ env 已把会话固定在连接/进程上时，请求里的声明一律忽略（
 服务多个前端会话）时 env 没法固定，才允许请求声明，且必须过 `_normalize_session`
 的防编造校验。
 
+环境隔离（P47 修复，2026-10-12）：进测试前移除 `MDCG_SESSION` / `DSH_SESSION_ID` /
+`MDCG_DSH_SESSIONS_ROOT`、结束复原（见 `_SESSION_ENV_KEYS`），使判据与宿主 env 无关。
+
 覆盖
 ----
 A 写入归属：两个会话各写一条，frontmatter.session 各自落位（含 temporal → timeline 可见）
@@ -54,6 +57,13 @@ from md_cg import mcp_server as ms
 
 PASS = 0
 FAILS = []
+
+# 环境隔离（P47 修复，2026-10-12；照 md_cg/test_h2_session_view_norm.py 第 221-224 行先例做）：
+# 宿主注入 MDCG_SESSION / DSH_SESSION_ID 时 env 权威会否决本测试自声明的会话，同一件在真实
+# DSH 环境与门禁环境读数分叉（实测 33/5 红 vs 全绿 = 门禁假绿）。本测试不依赖任何宿主 env
+# 会话，故进测试前保存并移除这三个键、结束复原；**不改实现语义**（env 权威是既有契约，
+# 本笔只做测试侧环境隔离）。
+_SESSION_ENV_KEYS = ("MDCG_SESSION", "DSH_SESSION_ID", "MDCG_DSH_SESSIONS_ROOT")
 
 
 def check(name, cond, detail=""):
@@ -293,17 +303,23 @@ def test_g(cgb):
 
 
 def main():
-    root = tempfile.mkdtemp(prefix="mdcg_p47_")
+    # 环境隔离（见 _SESSION_ENV_KEYS 注释）：先摘掉宿主注入的会话 env 再进测试，本测试
+    # 自声明的会话（sess_A / sess_B）在任何 harness 下都是权威；结束复原。
+    _saved_env = _setenv(**{k: None for k in _SESSION_ENV_KEYS})
     try:
-        cgb = _mk(root)
-        test_ab(cgb)
-        test_c(cgb)
-        test_d(cgb)
-        test_e(cgb)
-        test_g(cgb)
+        root = tempfile.mkdtemp(prefix="mdcg_p47_")
+        try:
+            cgb = _mk(root)
+            test_ab(cgb)
+            test_c(cgb)
+            test_d(cgb)
+            test_e(cgb)
+            test_g(cgb)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        test_f()
     finally:
-        shutil.rmtree(root, ignore_errors=True)
-    test_f()
+        _restore(_saved_env)
 
     print("\n通过 %d / 失败 %d" % (PASS, len(FAILS)))
     if FAILS:
