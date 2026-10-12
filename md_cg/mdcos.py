@@ -74,6 +74,15 @@ RRF_K = 60          # RRF 常数
 # 内部排序**（融合层只吃名次），故取相对量级即可，无需归一。
 TAG_AFFINITY_EXTRA = 0.05   # 第 2 个及以后命中 tag 的累加步长（防条数支配排序）
 
+# issue #130 追评：**名次不可信路**名单——这些路的分数是粗粒度、块内大量
+# 并列的匹配强度（entity 的 tag 亲和 `_tag_affinity`），其「名次」只由
+# `(-score, -importance, id)` 兜底键（写入序）决定、不携带相关性。它们只要
+# 出现同分块（同一分数出现 >= 2 次）就整路弃权投票（退回 recall_only 语义：
+# 只补候选池、不改排序），避免以写入序冒充名次（issue #130 实测：关掉实体路
+# 即从第 50 位精确复原到第 26 位）。按真实打分排序的路（lexical/bm25/fuzzy）
+# 不在名单内，行为逐位不变。
+_RANK_ABSTAIN_PATHS = ("entity",)
+
 
 def _tag_affinity(tags, query: str) -> float:
     """实体路的匹配强度（> 0 才算命中）。纯函数、可复算、零 IO。
@@ -1951,7 +1960,19 @@ class MdCGOS(MdCG):
             # 契约：这类路**本轮不参与打分**，退回 recall_only 语义（只补候选池、
             # 不改排序），并在 meta.no_rank_signal / path_fingerprint 留痕可审计。
             _scores = [float(_s) for _n, _s in scored]
-            if _gate_on and len(_scores) >= 2 and len(set(_scores)) == 1:
+            # issue #130 追评：仅「整路同分」拦不住实体路——只要有一个离群分数
+            # （如某节点多命中一个 tag -> `_tag_affinity` 给 base+0.05）就把 set
+            # 撑到 >=2，门失效，整路仍按写入序 w/(K+rank) 全额投票，同分块内部的
+            # 写入序照样冒充名次（实测真命中被压 24 位：26 -> 50）。
+            # 故对**名次不可信路**（`_RANK_ABSTAIN_PATHS`：分数是粗粒度 tag 亲和、
+            # 块内大量并列者）加严：只要出现**同分块**（同一分数出现 >=2 次）即整路
+            # 弃权投票（退回 recall_only 语义：只补候选池、不改排序），可审计留痕于
+            # meta.no_rank_signal。按真实打分排序的路（lexical 等）**逐位不变**。
+            _whole_tie = len(set(_scores)) == 1
+            _has_block = len(set(_scores)) < len(_scores)
+            if _gate_on and len(_scores) >= 2 and (
+                    _whole_tie
+                    or (_has_block and name in _RANK_ABSTAIN_PATHS)):
                 no_rank_signal.append(name)
                 ro.add(name)
                 continue
