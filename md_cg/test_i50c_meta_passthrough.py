@@ -50,17 +50,18 @@ issue50-d 收口（remember_gated ACCEPT 分支落盘=裁决值），显式 `imp
     裁决 accept 时才落盘，两次时刻必然不同；**非调用方声明的 meta**。
   · `condition_space` —— 仅其**派生**键 `time_window`（= created_at 起算，
     add :2225）随之变；其余键必须逐位相等（B3 单列）。
-  · `importance_source` —— issue50-d（2026-10-02）新增的**裁决面衍生键**
-    （"hint"|"heuristic"，标注落盘重要度来自显式声明还是闸门启发式），**仅
-    ACCEPT 直接路有**：DEFER 路经队列 accept 落盘，落盘时不存在本闸的 ACCEPT
-    裁决，该键无从产生（issue50-d 裁决①只覆盖 remember_gated 的 ACCEPT 分支）。
-    它不是调用方声明的 meta，不在 F1「声明不丢」的判据面内（B2 已排除）。
+  · `importance_source` —— issue50-d（2026-10-02）/#143 的**裁决面衍生键**：
+    #143 起**直接 ACCEPT 路**落本闸裁决来源（"hint"|"heuristic"，标注落盘重要度
+    来自显式声明还是闸门启发式）；**DEFER 路**经审查队列 accept 落盘时**无本闸
+    裁决**，该键为 None ⇒ 两路**必然不同**。该差异是**已登记**的（白名单第 5 条，
+    并由 B6 显式断言：直接路有值、DEFER 路为 None），不是被白名单掩盖的漏网差异；
+    它也不是调用方声明的 meta，不在 F1「声明不丢」的判据面内（B2 已排除）。
 其余三个白名单项之外的任何差异必须为 0（B1 逐行读数，不是结论）。
 
 断言分组（全部在**隔离临时根**的合成库上真跑，绝不触在役数据根）
   A 修复面：DEFER→accept 节点的声明 meta 与直接 ACCEPT 路**逐位相等**（六键
     点名 + role/derived_relation/bucket_zh 佐证；并证「两路都有」而非「两路都缺」）
-  B 白名单外差异为 0（逐键对拍表 + 白名单恰 4 条 + 缺键为 0 + cs 非 time_window 键相等）
+  B 白名单外差异为 0（逐键对拍表 + 白名单恰 5 条 + 缺键为 0 + cs 非 time_window 键相等 + B6 两路差异显式断言）
   C `node_id=None` 不抛异常且行为可辨（DEFER / 入队 / 内容派生 id / 如实标注 / accept 闭环）
   D 裁决既有职责不削弱（幂等对账、自验违例、reject/noop 不落盘、merge 并集、留痕）
 
@@ -210,10 +211,13 @@ _WHITELIST = {
     "reviewer": "accept 路径的裁决归属留痕（mdcos.py:2571-2572）；硬边界②不许削弱",
     "created_at": "写入时刻时间戳：直接路写入即落盘 / DEFER 路裁决 accept 时落盘",
     "condition_space": "仅派生键 time_window（= created_at 起算）随之变；其余键见 B3",
-    # issue50-d（2026-10-02）：裁决面衍生键，仅 ACCEPT 直接路有——DEFER 路经
-    # 队列 accept 落盘时不存在本闸的 ACCEPT 裁决，该键无从产生；不是调用方
-    # 声明的 meta，不在 F1「声明不丢」的判据面内（B2 已排除）。
-    "importance_source": "issue50-d 的落盘重要度来源标注，仅直接 ACCEPT 路有",
+    # issue50-d（2026-10-02）/#143：裁决面衍生键，**两路必然不同**——直接 ACCEPT
+    # 路落本闸裁决来源（hint|heuristic）；DEFER 路经审查队列 accept 落盘时无本闸
+    # 裁决，该键为 None。它是**已登记**差异（B6 显式断言），也不是调用方声明的
+    # meta，不在 F1「声明不丢」的判据面内（B2 已排除）。
+    "importance_source": "issue50-d/#143 起：直接 ACCEPT 路落裁决来源 hint/heuristic；"
+                         "DEFER 路经审查队列 accept 落盘时该键为 None（无本闸裁决），"
+                         "故两路必然不同",
 }
 
 # 契约点名的六个声明键 → 直接 ACCEPT 路应落在的那些 fm 键。
@@ -305,6 +309,17 @@ def g_b():
     ok(len(_WHITELIST) == 5 and all(k in diff for k in _WHITELIST),
        "B5 白名单恰 5 条且每条都真实命中（无空挂；第 5 条=issue50-d 的"
        " importance_source）", (len(_WHITELIST), diff))
+    # --- B6：`importance_source` 是**已登记**的两路差异，此处**显式断言**它 ----
+    # 直接 ACCEPT 路落本闸裁决来源（hint|heuristic）；DEFER 路经审查队列 accept
+    # 落盘时无本闸裁决 ⇒ 该键为 None。不是靠白名单掩盖，失败信息写清两路实际值。
+    _isrc_d = fd.get("importance_source")
+    _isrc_z = fz.get("importance_source")
+    ok(_isrc_d is not None and _isrc_d in ("hint", "heuristic")
+       and _isrc_z is None,
+       "B6 importance_source 两路差异被显式断言：直接 ACCEPT 路=%r（非空且 ∈ "
+       "{hint,heuristic}）、DEFER→accept 路=%r（应为 None）"
+       % (_isrc_d, _isrc_z),
+       (_isrc_d, _isrc_z))
 
 
 # ---------------------------------------------------------------- C None 捩点
