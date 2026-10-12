@@ -5119,8 +5119,9 @@ class MdCG:
         if not node:
             return None
         if verdict == "falsified":
-            # 写保护（N130，2026-09-25）：证伪 = 对原节点的一次**硬删除**
-            # （os.remove，无快照、不进 trash），与 forget/降级同受「不可遗忘」
+            # 写保护（N130，2026-09-25）：证伪 = 对原节点的一次**删除**——软删
+            # （进 trash/ + 写删除清单，restore(node_id, force=True) 可复原），
+            # 与 forget/降级同受「不可遗忘」
             # 保护——self/anchor 层、protected 标记、importance≥0.7 不得被一次
             # verify 调用一键删除。对照 forget 路径（mdcos.py forget）同一闸口：
             # 受保护节点需显式 override=True（旧版本先快照进 _protected_history
@@ -5132,9 +5133,31 @@ class MdCG:
             self.add_rejected(hypothesis=node["content"][:200],
                               reason=evidence,
                               verification_basis="test")
-            # 从原位置删除（节点进入 rejected 层）
-            os.remove(os.path.join(self.root, node["path"]))
-            self._unstage(node_id)      # 同上：索引删除必须可重放（防幽灵条目）
+            # 从原位置删除（节点进入 rejected 层）——**走软删单点**，与 forget
+            # 同一条可恢复路径：MdCGOS._forget_apply（节点文件移入 trash/ +
+            # 写删除清单 + _unstage 摘索引）。此前这里是 os.remove **硬删**
+            # （无快照、不进 trash、restore 恒 not_in_trash）——同一份记忆在
+            # verify 与 forget 两条路径上可恢复性分叉（一次裁决即不可逆丢失）。
+            _sdel = getattr(self, "_forget_apply", None)
+            if _sdel is not None:
+                _sdel(node_id, self.index["nodes"].get(node_id) or node, evidence)
+            else:
+                # 纯 MdCG（未挂载 mdcos 的 OS 软删面）**不得硬删**：就地按同一
+                # 口径兜底——同一 trash/ 布局、同一删除清单、同一摘索引收尾
+                # （不是第二套判据；宁可不删也不丢数据，绝不退化成硬删）。
+                _tdir = os.path.join(self.root, "trash")
+                os.makedirs(_tdir, exist_ok=True)
+                _dst = os.path.join(_tdir, "%s.md" % node_id)
+                os.replace(os.path.join(self.root, node["path"]), _dst)
+                append_jsonl(os.path.join(self.root, "_deletions.jsonl"),
+                             {"t": time.time(), "id": node_id,
+                              "hash": hashlib.sha256(
+                                  (node.get("content") or "").encode("utf-8")
+                              ).hexdigest()[:16],
+                              "reason": evidence, "actor": None,
+                              "trash": os.path.relpath(_dst, self.root)
+                                       .replace(os.sep, "/")})
+                self._unstage(node_id)
             trust.invalidate_cache(self)        # 索引已变 → 反查索引作废
             # 地基塌了：直接下游立即标存疑（**同步一跳**，永不抛、不阻断本次裁决）
             propagation = trust.mark_dependents(
