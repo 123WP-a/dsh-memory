@@ -280,6 +280,19 @@ def dispatch_verify_job(verifier_jobs_dir: str, iter_id: str,
     A2 的比对输入）。
     """
     jobs = os.path.abspath(verifier_jobs_dir)
+# N126-ANCHOR-BEGIN
+    # 产出侧（issue #126 B-2a）：派发即冻结本轮判据面——A3 的比对基准。
+    # verify_runner.py 固定读 hive/interop/<iter_id>/frozen.json（本仓标准位）；
+    # 修前 freeze() 调用点只在测试里，生产 0 处 ⇒ 门禁侧无凭证可比。
+    # 冻结失败不吞：如实记进 out["frozen_error"]（门禁侧 fail-closed：无凭证
+    # = 未互验 ⇒ 不放行），绝不假装冻结成功。
+    frozen_cred = None
+    frozen_err = None
+    try:
+        frozen_cred = freeze(iter_id)
+    except Exception as exc:                      # noqa: BLE001
+        frozen_err = "%s: %s" % (type(exc).__name__, exc)
+# N126-ANCHOR-END
     runner = os.path.join(HERE, "hive", "verify_runner.py")
     spec = {
         "model": "cmd",
@@ -299,6 +312,13 @@ def dispatch_verify_job(verifier_jobs_dir: str, iter_id: str,
            "note": "非阻塞投递完成——进度靠验证实例心跳拉取，不轮询不等待"}
     # hive/ 是源码树子系统（出货包不含）：投递本身成功，但没有可执行 runner 时
     # 消费端会静默失败 → 显式报警，不假装这一票能跑（2026-09-24 补齐）。
+# N126-ANCHOR-BEGIN
+    if frozen_err:
+        out["frozen_error"] = frozen_err
+    else:
+        out["frozen_path"] = frozen_cred.get("_path")
+        out["frozen_digest"] = frozen_cred.get("digest")
+# N126-ANCHOR-END
     if not os.path.isfile(runner):
         out["warning"] = (f"验证 runner 不存在：{runner}——投递已落盘，但本次"
                           "验证不会被消费（hive/ 为源码树子系统，安装态需另行提供）")
