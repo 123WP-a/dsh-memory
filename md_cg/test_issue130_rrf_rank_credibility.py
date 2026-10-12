@@ -4,7 +4,7 @@
 # 功能名：RRF 融合层的名次可信度契约守卫
 # 生效条件：改动 `md_cg/mdcos.py` 的 `_path_entity` 打分或 `search_rrf` 融合循环之后必跑
 # 子功能：①断言「分数无判别力的路不得冒充名次」（常量分路不参与打分，退回 recall_only）
-#         ②断言有判别力的路**不**被误伤 ③3 条定点变异：把判据打坏 ⇒ 读数必须变差（逐字给）
+#         ②断言「不在 _RANK_ABSTAIN_PATHS 内、分数有分级的路不被名次可信度门拦下」与「名单内的路（entity）出现同分块 ⇒ 必被拦」（本节契约于 #130 追评后修正：量化结论「不拦则真命中被压 24 位，26 → 50」） ③4 条定点变异：把判据打坏 ⇒ 读数必须变差（逐字给）
 # 执行：python -m md_cg.test_issue130_rrf_rank_credibility
 # 验证方式：末行「通过 N / 失败 M」；变异段逐条打印「变异前 → 变异后」读数
 # 不适用条件：只测**检索侧融合契约**，不测 reader/判分层；不碰在役库（全程 tempfile 沙箱）
@@ -29,7 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from md_cg import mdcos as _mdcos                      # noqa: E402
-from md_cg.mdcos import MdCGOS, _tag_affinity          # noqa: E402
+from md_cg.mdcos import MdCGOS, _tag_affinity, _RANK_ABSTAIN_PATHS          # noqa: E402
 
 PASS = FAIL = 0
 FAILS = []
@@ -101,7 +101,13 @@ def mutant(patches, name):
     return mod
 
 
-GATE = "            if _gate_on and len(_scores) >= 2 and len(set(_scores)) == 1:"
+# 定点变异锚点：**逐字**取自 md_cg/mdcos.py 的真实原文（含缩进与换行，禁行号）。
+# GATE = 追评加严后的**多行**门控；GATE_LOOSE = 加严前的单行旧形态（M3 变异用）。
+GATE = (
+    "            if _gate_on and len(_scores) >= 2 and (\n"
+    "                    _whole_tie\n"
+    "                    or (_has_block and name in _RANK_ABSTAIN_PATHS)):")
+GATE_LOOSE = "            if _gate_on and len(_scores) >= 2 and len(set(_scores)) == 1:"
 GATE_MULTI = "_gate_on = len(_active_paths) >= 2"
 ENT_LINE = '            aff = _tag_affinity(tags, query)      # issue #130：布尔命中 → 匹配强度'
 ENT_OLD = '            aff = 1.0 if any(t in query or query in t for t in tags if len(t) >= 2) else 0.0'
@@ -135,12 +141,22 @@ def main():
               "entity" in base["no_rank_signal"], base["no_rank_signal"])
         check("top1 仍是真命中（不再被标签干扰顶掉）", base["top1_on"] == "target", base["top1_on"])
 
-        print("\n[3] 不误伤：tag 有分级（分数异值）时 entity 仍参与打分")
+        print("\n[3] 契约修正（issue #130 追评）：拦名单内路的同分块，不拦真实打分路")
+        print("    本节契约于 #130 追评后修正：量化结论「不拦则真命中被压 24 位，26 → 50」")
         graded = run_case(MdCGOS, sandbox, "graded", same_tag=False)
         print("    读数：rank_on=%s rank_off=%s no_rank_signal=%s"
               % (graded["rank_on"], graded["rank_off"], graded["no_rank_signal"]))
-        check("有判别力的路不被名次可信度门拦下（no_rank_signal 不含 entity）",
-              "entity" not in graded["no_rank_signal"], graded["no_rank_signal"])
+        check("（正向）entity 出现同分块 ⇒ 被名次可信度门拦下（no_rank_signal 含 entity）",
+              "entity" in graded["no_rank_signal"], graded["no_rank_signal"])
+        check("（名单）_RANK_ABSTAIN_PATHS 逐字可审计（== ('entity',)）",
+              _RANK_ABSTAIN_PATHS == ("entity",), list(_RANK_ABSTAIN_PATHS))
+        graded2 = run_case(MdCGOS, sandbox, "graded2", same_tag=False,
+                           paths=("lexical", "entity"))
+        print("    读数：paths=('lexical','entity') → rank_on=%s no_rank_signal=%s"
+              % (graded2["rank_on"], graded2["no_rank_signal"]))
+        check("（反向）不在 _RANK_ABSTAIN_PATHS 内、分数有分级的路（lexical）不被门拦下",
+              "lexical" not in graded2["no_rank_signal"],
+              "abstain=%s signal=%s" % (list(_RANK_ABSTAIN_PATHS), graded2["no_rank_signal"]))
 
         print("\n[3b] 生效条件：**单路**竞争不启用契约（保既有 importance 兜底契约）")
         single = run_case(MdCGOS, sandbox, "single", paths=("entity",), with_off=False)
@@ -168,14 +184,15 @@ def main():
               r2["rank_on"] == 1 and "entity" in r2["no_rank_signal"],
               "rank=%s signal=%s" % (r2["rank_on"], r2["no_rank_signal"]))
 
-        m3 = mutant([("len(set(_scores)) == 1:", "len(set(_scores)) == 1 and _scores[0] == 1.0:")],
-                    "m3_only_one")
-        r3 = run_case(m3.MdCGOS, sandbox, "m3")
-        print("    M3 把判据收窄成「常量且 ==1.0」特判 → rank_on=%s no_rank_signal=%s"
-              % (r3["rank_on"], r3["no_rank_signal"]))
-        check("M3 契约是「无判别力」而非「等于 1.0」特判：收窄后 0.7083 常量漏网、名次退回 41",
-              r3["rank_on"] == 41 and base["rank_on"] == 1,
-              "fixed=%s mutant=%s" % (base["rank_on"], r3["rank_on"]))
+        m3 = mutant([(GATE, GATE_LOOSE)], "m3_loose")
+        r3 = run_case(m3.MdCGOS, sandbox, "m3", same_tag=False,
+                      paths=("lexical", "entity"))
+        print("    M3 回退加严（只拦整路同分）→ no_rank_signal=%s"
+              % (r3["no_rank_signal"],))
+        check("M3 加严判据被打坏 ⇒ 有分级的 entity 重新参与打分（no_rank_signal 不再含 entity）",
+              "entity" not in r3["no_rank_signal"]
+              and "entity" in graded2["no_rank_signal"],
+              "fixed=%s mutant=%s" % (graded2["no_rank_signal"], r3["no_rank_signal"]))
 
         m4 = mutant([(GATE_MULTI, "_gate_on = True")], "m4_always")
         r4 = run_case(m4.MdCGOS, sandbox, "m4", paths=("entity",), with_off=False)
