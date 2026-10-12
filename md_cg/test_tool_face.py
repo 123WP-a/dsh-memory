@@ -139,6 +139,17 @@ def _run():
     enum_ops.discard("help")
     gap = sorted(o for o in enum_ops if o not in secs)
     _check("op 枚举的每个 op 都有按需说明段（%d 个）" % len(enum_ops), not gap, str(gap))
+    # issue #133 M3：枚举串 ↔ dispatch 分支 **双向** 对账（修前此方向零守卫——
+    # 从枚举串删掉一个 op，本测试仍绿而服务端仍接受）。help 在枚举串里但
+    # 不需说明段，比对时补回。
+    from . import protocol as _protocol
+    _dops = set(_protocol.dispatch_ops().get("ops") or [])
+    _enum_plus_help = set(enum_ops) | {"help"}
+    _enum_only = sorted(_enum_plus_help - _dops)
+    _disp_only = sorted(_dops - _enum_plus_help)
+    _check("op 枚举串 ↔ dispatch 分支 双向一致（enum_only=%s dispatch_only=%s）"
+           % (_enum_only, _disp_only),
+           not _enum_only and not _disp_only)
 
     # ---- ④ help 面 ----
     idx = tf.help_text(origin, query=None)
