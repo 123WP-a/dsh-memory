@@ -658,6 +658,31 @@ def _read_foreign_sampled(cg):
     return rate == 1 or cg._read_foreign_seen % rate == 0
 
 
+# ---- issue #172（P1，路径穿越）：restore() 入口 node_id 校验单点（先拦后读）----
+# 病象：restore() 曾对 node_id 零校验直接拼路径 os.path.join(self.trash_dir,
+#       f"{node_id}.md")——`../secret` 拼出 trash 之外的路径，os.path.exists
+#       通过后文件**被打开读取**，直到 self.add() 的 P0-1 白名单才拦下（先读后拦）。
+# 处置：判据收口到本单点，restore 入口**先拦后读**——非法即返回：不读 deletions_log、
+#       不 os.path.exists、不 open。判据与 add() 的 P0-1 白名单**同源**：同一
+#       _NODE_ID_RE + 同一 '..' 禁令 + 同一类型/长度闸 + 同一 _NODE_ID_FORBIDDEN。
+# 白名单字符类不含 斜杠/反斜杠/冒号/百分号，'..' 另判：`../`、绝对路径、盘符、
+#       `..` 加反斜杠、URL 编码形态（%2e%2e%2f / ..%2f）一律拒；
+# 合法 id（字母数字 _ . @ - 与 中文 与 逗号）行为不变。
+def _restore_id_ok(node_id) -> bool:
+    """node_id 是否可进入 restore 的落盘路径拼接（fail-closed，判据同 add）。"""
+    from .mdcg import _NODE_ID_RE, _NODE_ID_FORBIDDEN
+    if not isinstance(node_id, str):
+        return False
+    if not node_id or len(node_id) > 128 or ".." in node_id:
+        return False
+    if node_id in _NODE_ID_FORBIDDEN:
+        return False
+    return bool(_NODE_ID_RE.match(node_id))
+
+
+
+
+
 # 生效条件：以任意 root 构造时按其拼接 audit_log/hippocampus/trash 等路径并 makedirs 创建 hippocampus 与 trash_dir（exist_ok=True），autoflush 透传父类、actor 存入 self.actor；
 class MdCGOS(MdCG):
     """MdCG + 记忆 OS 七项能力。"""
@@ -3391,6 +3416,11 @@ class MdCGOS(MdCG):
 # 生效条件：当 node_id 传入时，若 deletions_log 中存在该 id 且 force=False 返回 tombstoned 拒绝；否则检查 trash_dir/{node_id}.md，os.path.exists 为 False 返回 not_in_trash；文件含坏字节（非 UTF-8）无法解析时返回 error=corrupt 且 trash 源原样保留（不删不移）；可打开则读取并以 add(override=True) + trash frontmatter 元数据全量透传（显式形参逐项传，其余键经 **extra 回写；lifecycle_state 仅在 active→该态合法迁移时透传）恢复、移除 trash 源、audit，返回 ok True/id/forced=bool(force)；
     def restore(self, node_id: str, force: bool = False):
         """恢复：若在删除清单中且未 force → 拒绝（恢复时删除检查）。"""
+        # issue #172（P1，路径穿越）：入口**先拦后读**——node_id 非法即返回，
+        # **不触碰文件系统**（不读 deletions_log、不 os.path.exists、不 open）。
+        # 合法 id 行为不变；判据单点见模块级 _restore_id_ok（与 add 的 P0-1 白名单同源）。
+        if not _restore_id_ok(node_id):
+            return {"ok": False, "error": "invalid_id"}
         tomb = [r for r in read_jsonl(self.deletions_log) if r.get("id") == node_id]
         if tomb and not force:
             return {"ok": False, "error": "tombstoned",
