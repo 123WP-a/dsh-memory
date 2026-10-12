@@ -79,6 +79,7 @@ RULES = {
     'MDCG_STATUS_HEAD': {'bool_like': True, 'type': 'bool'},
     'MDCG_SUSTAIN': {'bool_like': True, 'type': 'bool'},
     'MDCG_SUSTAIN_AUTOHEAL': {'bool_like': True, 'type': 'bool'},
+    'MDCG_SUSTAIN_BEAT_THREAD': {'bool_like': True, 'type': 'bool'},
     'MDCG_TEMPORAL_GAMMA': {'min': 0.0, 'type': 'float'},
     'MDCG_TENANT': {'type': 'str'},
     'MDCG_TOOL_FACE': {'bool_like': True, 'type': 'bool'},
