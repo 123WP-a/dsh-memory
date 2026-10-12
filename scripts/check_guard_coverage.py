@@ -16,6 +16,7 @@
   1  存在**未登记的孤儿守卫**（既无执行面、又不在登记表）
   2  环境/解析错误（fail-closed：读不到 package.json / workflows / 收集面）
   3  登记表格式错误（缺理由或缺复核人）
+  4  gate/CI 点名的仓内脚本路径在磁盘上不存在（#179 反向判据）
 
 用法：
   python -X utf8 scripts/check_guard_coverage.py                 # 人读覆盖矩阵
@@ -28,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +81,7 @@ EXIT_MEANING = {
     1: "存在未登记的孤儿守卫",
     2: "环境/解析错误（fail-closed）",
     3: "登记表格式错误",
+    4: "gate/CI 点名的仓内脚本路径不存在（点名缺失）",
 }
 
 
@@ -184,6 +187,76 @@ def classify(guard: str, sf: dict) -> tuple[str, str]:
     return "orphan", "无执行面"
 
 
+# [issue-179 patch] 反向判据：被 gate/CI 点名的仓内脚本路径必须在磁盘上存在。
+# 解析保守：只收「含 >=1 个斜杠且以 .py/.js/.mjs/.cjs 结尾」的仓内相对 token；
+# 以 / . ~ 开头或含 .. 的形态一律不收（绝对路径 / 包路径 / 通配面都不瞎猜）。
+_NAMED_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./~-])"
+    r"([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)+\.(?:py|js|mjs|cjs))"
+    r"(?![A-Za-z0-9_.-])"
+)
+
+
+def named_paths_in(text: str) -> set:
+    """抽出一段文本里被点名的仓内脚本路径（去重）。"""
+    out = set()
+    for m in _NAMED_PATH_RE.finditer(text or ""):
+        tok = m.group(1)
+        if ".." in tok:
+            continue
+        out.add(tok)
+    return out
+
+
+def _workflow_run_text(repo: str) -> str:
+    """只取 .github/workflows/*.yml|yaml 的 run: 步骤命令行（容缺：无目录 -> 空串）。"""
+    wf_dir = os.path.join(repo, ".github", "workflows")
+    if not os.path.isdir(wf_dir):
+        return ""
+    out = []
+    for name in sorted(os.listdir(wf_dir)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        in_run = False
+        run_ind = -1
+        for ln in _read(os.path.join(wf_dir, name)).splitlines():
+            s = ln.strip()
+            ind = len(ln) - len(ln.lstrip())
+            if in_run and s and ind > run_ind:
+                if not s.startswith("#"):
+                    out.append(s)
+                continue
+            in_run = False
+            if s.startswith("run:") or s.startswith("- run:"):
+                out.append(s)
+                run_ind = ind
+                in_run = s.endswith("|") or s.endswith(">") or s.endswith("|-")
+    return "\n".join(out)
+
+
+def missing_named_paths(repo_root: str) -> list:
+    """被 gate/CI 点名、却不在磁盘上的仓内脚本路径（排序去重）。
+
+    这是 #129 元守卫缺失的反向那半：既有判据只遍历「盘上已存在的守卫」，
+    故「点名了但文件没了」当场不可见（#179）。本函数只判**存在性**，
+    不判该守卫跑得绿不绿（check_line_anchors 的红基线是另一回事）。
+    """
+    pj_path = os.path.join(repo_root, "package.json")
+    if not os.path.isfile(pj_path):
+        raise OSError("package.json 不存在：" + pj_path)
+    pj = json.loads(_read(pj_path))
+    scripts = pj.get("scripts") or {}
+    named = set()
+    for k in sorted(scripts):
+        named |= named_paths_in(str(scripts[k]))
+    named |= named_paths_in(_workflow_run_text(repo_root))
+    missing = []
+    for rel in sorted(named):
+        if not os.path.exists(os.path.join(repo_root, rel.replace("/", os.sep))):
+            missing.append(rel)
+    return missing
+
+
 def build(repo: str) -> dict:
     guards = gather_guards(repo)
     sf = gather_surfaces(repo)
@@ -217,6 +290,7 @@ def build(repo: str) -> dict:
         "bad_registry": bad_registry,
         "workflows": sf["workflows"],
         "n_collected_tests": len(sf["collected_tests"]),
+        "missing_named": missing_named_paths(repo),
     }
 
 
@@ -235,10 +309,16 @@ def render(info: dict) -> None:
             extra = "  [已登记例外] " + r["exception_reason"][:40]
         print("  %-36s %-14s %s%s" % (r["guard"], mark, r["why"][:56], extra))
     print("")
-    print("  小计：守卫 %d ｜ 有执行面 %d ｜ 登记例外 %d ｜ 未登记孤儿 %d"
-          % (info["n_guards"], info["n_covered"], info["n_exception"], len(info["orphans"])))
+    print("  小计：守卫 %d ｜ 有执行面 %d ｜ 登记例外 %d ｜ 未登记孤儿 %d ｜ 点名缺失 %d"
+          % (info["n_guards"], info["n_covered"], info["n_exception"], len(info["orphans"]),
+             len(info["missing_named"])))
     if info["bad_registry"]:
         print("  [登记表格式错误] " + "；".join(info["bad_registry"]))
+    for m in info["missing_named"]:
+        print("  [点名缺失] %s —— 被 gate/CI 点名但盘上不存在；该执行面已失去判据对象" % m)
+    if info["missing_named"]:
+        print("  FAIL：点名缺失 %d 项 —— %s" % (len(info["missing_named"]),
+                                               "；".join(info["missing_named"])))
     for o in info["orphans"]:
         print("  [孤儿] %s —— 既无执行面又未登记；请接进 gate/CI，或登记理由" % o)
 
@@ -248,6 +328,8 @@ def exit_code(info: dict) -> int:
         return 3
     if info["orphans"]:
         return 1
+    if info["missing_named"]:
+        return 4  # #179：被 gate/CI 点名的仓内脚本路径在盘上不存在
     return 0
 
 
