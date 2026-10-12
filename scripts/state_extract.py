@@ -64,6 +64,23 @@ def _short(text: str, n: int = 24) -> str:
     return t[:n]
 
 
+#: 否定前缀（#169）：不/没/无/别（可隔空格、可套「太/怎么」）——
+#: 出现在正面谓词之前即判负；口径「宁可漏，不可误」：前缀位有否定标记就不作正面记。
+_NEG_PREFIX_RE = re.compile(r"[不没无别]\s*(?:怎么|太)*")
+
+
+def _neg_polarity(match_text: str, pred: str) -> bool:
+    """极性判定：谓词自带否定（讨厌/不喜欢）或前缀位出现否定标记 => 负面。"""
+    if not pred:
+        return False                      # 非情感规则（无 p 组）：不带极性
+    if pred in ("讨厌", "不喜欢"):
+        return True
+    idx = match_text.rfind(pred)
+    if idx <= 0:
+        return False
+    return bool(_NEG_PREFIX_RE.search(match_text[:idx]))
+
+
 def extract_turn(text: str, role: str, subject: str = None):
     """单轮抽取（只认用户轮）→ [候选事件 dict, ...]（零命中返回 []）。"""
     subject = subject or os.environ.get("MDCG_STATE_SUBJECT") or DEFAULT_SUBJECT
@@ -77,7 +94,7 @@ def extract_turn(text: str, role: str, subject: str = None):
         val = _clean_value((m.group(gp) or "").strip())
         if not val:
             continue
-        neg = m.groupdict().get("p") in ("讨厌", "不喜欢")
+        neg = _neg_polarity(m.group(0), m.groupdict().get("p") or "")
         new = ("不喜欢：" + val) if neg else val
         out.append({"subject": subject, "slot": slot, "new": new, "kind": kind,
                     "match": m.group(0)})
