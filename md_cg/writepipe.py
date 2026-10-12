@@ -39,9 +39,108 @@ write 的六道闸（audit 校验 / consistency 冲突 / review 审核 / gated �
 覆盖不经本链的写入路径）。根因取证见 `_commit_visibility` 文档串。
 """
 
+# #142②（2026-10-12 DSH 端）：尝试账本的模块级依赖 —— 记账点要用 os / sys / time 与
+# fsutil.append_jsonl（追加原语，不另写第二份）。
+import os
+import sys
+import time
+
 from . import twophase, trust
+from .fsutil import append_jsonl
 
 __all__ = ["WritePipeline", "default_pipeline"]
+
+
+#: #142②（2026-10-12 DSH 端）· **写入尝试账本**（issue §3.3(e) 方案 1「另立一本账」）。
+#: 被修的面：`_write_2pc.jsonl` 只覆盖「闸门全放行」与 gated 两条**真实落盘**路径，
+#: 闸门短路出口（审核 REJECT / 入队 DEFER / 超限）在两段式账本上**零覆盖** ⇒
+#: 「一次写入到底发生了什么」在短路面上无从回答。
+#: 为什么**不**把短路补进 `_write_2pc.jsonl`（两条在役守卫各钉一条，改任一侧即红）：
+#:   · `md_cg/test_twophase.py` ⑧2「未落盘的分支不产生 intent」——补进去即 34/1；
+#:   · `md_cg/test_write_return_shape.py::g_142_halt_2pc`「短路出口 2pc delta == 0」。
+#: ⇒ 两本账各记各的：两段式（崩溃一致性）零漂移，尝试账本（出口可观测性）新增覆盖。
+ATTEMPT_BASENAME = "_write_attempts"
+#: 活动账本文件名（落在 cg.root 下，随记忆库一起备份/迁移）。
+ATTEMPT_LOG_FILE = ATTEMPT_BASENAME + ".jsonl"
+#: 归档分片目录（轮转＝本账**有界性**的来源）。
+ATTEMPT_ARCHIVE_DIR = "_write_attempts_archive"
+#: 轮转阈值（字节）的 env 名与默认值：默认与审计面同口径 64 MiB，<=0 表示不轮转。
+ATTEMPT_ROTATE_ENV = "MDCG_WRITE_ATTEMPT_ROTATE_BYTES"
+ATTEMPT_ROTATE_DEFAULT = 64 << 20
+#: outcome 三态（issue §3.3(e) 方案 1 的取值集）。与两段式四态**不同源**：
+#: 本账回答「这次尝试停在哪个出口」，不回答「落盘是否完成」。
+ATTEMPT_COMMITTED = "committed"
+ATTEMPT_SHORT_CIRCUIT = "short_circuit"
+ATTEMPT_ERROR = "error"
+
+
+# 生效条件：env ATTEMPT_ROTATE_ENV 缺席或为空白时返回 ATTEMPT_ROTATE_DEFAULT；为可解析整数时返回该整数（<=0 表示不轮转）；不可解析时回落 ATTEMPT_ROTATE_DEFAULT，配置坏值不导致丢账；
+def _attempt_rotate_bytes() -> int:
+    """尝试账本的轮转阈值（字节）——env 可调，缺省与审计面同口径。"""
+    raw = os.environ.get(ATTEMPT_ROTATE_ENV)
+    if raw is None or not str(raw).strip():
+        return ATTEMPT_ROTATE_DEFAULT
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return ATTEMPT_ROTATE_DEFAULT
+
+
+# 生效条件：无前置；按 outcome 组装一行尝试记录（t/outcome/id/resp_id ＋ 非 None 的 content_kind/layer/halted_by/error/rotate_error），阈值>0 且活动账本已达阈值时先经 Rotator.rotate 切分活动账本、再 append_jsonl 追加；轮转失败**不丢账**（本行照记并如实留 rotate_error）；**自身绝不外抛**——out 是 dict 时写 out["attempt_ledger_error"]、否则写 stderr（不静默、不改写写入语义）；
+def _append_attempt(cg, nid, a, outcome, halted_by=None, out=None, error=None):
+    """#142② 尝试账本的**唯一写入点**：把一次写入尝试的出口如实落一行（append-only）。
+
+    两个 id 都在场（本字段集是本批的判据面，改一处即红）：
+      · `id`      —— **请求 id**（`ctx["nid"]`）。四个出口一律同源，故同一请求
+        无论停在哪条出口，账本行都用同一个键可循；
+      · `resp_id` —— **调用方看到的响应 id**（`out["id"]`）。落盘 / 入队（DEFER）/
+        超限三出口与请求 id 相同；`_gate_audit` 的 REJECT 出口则**不同** —— 那里
+        响应 id 是「负记忆记录 id」（`cg.add_rejected` 自铸，是调用方取回该记录的
+        句柄，既有响应契约、本批不改）。只记请求 id 会让该出口的账本行**无法与
+        调用方记录 join**；故两个都留，且不做合并。
+
+    为什么收敛成单点：四处出口（超限 / 闸门短路 / 执行器异常 / 落盘成功）各写各的
+    会让「字段集 + 轮转接线」随出口漂移。为什么失败不外抛：写入内容已落盘（或已被
+    闸门正常拒绝），记账故障不得把「写入成功」改写成「写入失败」诱使调用方重试 ——
+    与本模块 `_commit_visibility` 同口径：如实标记、不静默、不改写语义。
+    """
+    try:
+        ck = a.get("content_kind")
+        lyr = a.get("layer")
+        rec = {"t": time.time(), "outcome": outcome, "id": nid,
+               "resp_id": out.get("id") if isinstance(out, dict) else None,
+               "content_kind": ck.strip() if isinstance(ck, str) and ck.strip() else None,
+               "layer": lyr if isinstance(lyr, str) and lyr else None,
+               "halted_by": halted_by, "error": error}
+        rb = _attempt_rotate_bytes()
+        if rb > 0:
+            active = os.path.join(cg.root, ATTEMPT_LOG_FILE)
+            try:
+                full = os.path.getsize(active) >= rb
+            except OSError:
+                full = False
+            if full:
+                # 复用共享件、不自造分片名（撞 test_audit_rotate_parity ③d）。
+                # 不用 maybe_rotate：本处无跨调用实例（writes 计数每次归零），
+                # Rotator.rotate 自带「size < rotate_bytes 即早退」，口径更严。
+                try:
+                    from .rotate import Rotator
+                    Rotator(cg.root, ATTEMPT_BASENAME, ATTEMPT_ARCHIVE_DIR,
+                            rotate_bytes=rb).rotate()
+                except Exception as exc:               # noqa: BLE001
+                    # 轮转失败**不丢账**：本行照记，失败如实带在行里（不静默）。
+                    rec["rotate_error"] = "%s: %s" % (type(exc).__name__, exc)
+        rec = {k: v for k, v in rec.items() if v is not None}
+        append_jsonl(os.path.join(cg.root, ATTEMPT_LOG_FILE), rec)
+    except Exception as exc:                           # noqa: BLE001
+        # 记账故障不改写写入语义，也不静默 —— 与 _commit_visibility 同口径。
+        if isinstance(out, dict):
+            out["attempt_ledger_error"] = "%s: %s" % (type(exc).__name__, exc)
+        else:
+            print("[writepipe] 尝试账本记账失败（写入语义未受影响）：%s: %s"
+                  % (type(exc).__name__, exc), file=sys.stderr)
+
+
 
 
 # 生效条件：调用即对 cg 执行 flush()（无脏数据时为 no-op），且仅当该调用抛异常而 out 是 dict 时在 out 写入 "flush_error"，异常本身不外抛；
@@ -154,7 +253,10 @@ class WritePipeline:
         _wc = a.get("content") or ""
         _wbytes = len(_wc.encode("utf-8")) if isinstance(_wc, str) else 0
         if _wbytes > MAX_WRITE_BYTES:
-            return {"ok": False, "id": _nid, "committed": False,
+            # #142②：超限出口也是「一次尝试的出口」——落一行尝试账本再原样返回
+            # （响应体逐字节不变：仍命中协议形态 gate_hard_reject）。因响应体改为
+            # 命名返回体 `_over`，本处三键齐由守卫 G4 的 AST 判据覆盖（含命名返回）。
+            _over = {"ok": False, "id": _nid, "committed": False,
                     "gate": "writelimit_size",
                     "error": "content 超过写入硬上限（issue #82.3）",
                     "bytes": _wbytes, "limit": MAX_WRITE_BYTES,
@@ -163,6 +265,9 @@ class WritePipeline:
                     "hint": ("写入被拒（硬上限，不是工具故障）：正文 %d 字节 > 上限 %d 字节。"
                              "本上限全 content_kind 统一（issue #82.3），重试同样结果——"
                              "请缩短正文后重写。" % (_wbytes, MAX_WRITE_BYTES))}
+            _append_attempt(cg, _nid, a, ATTEMPT_SHORT_CIRCUIT,
+                            halted_by="writelimit_size", out=_over)
+            return _over
         # B1（2026-09-30）：自动 id 的铸造**只有一份实现**（mdcg.mint_auto_id）
         # ——原先此处 `"mem_" + 毫秒` 与 mcp_server 的 mdcg_remember 分支各写一份，
         # 同毫秒自动写入铸出同一 id，被 add 的 upsert 语义静默顶替（无失败信号）。
@@ -180,6 +285,16 @@ class WritePipeline:
                 # 而该守卫文件不在本件写面（task-35：写面仅 writepipe.py + 本批守卫）
                 # ⇒ 按纪律**回退改动、把口径冲突上报**，不在本件单方面改语义。
                 # 详见 _team/writepipe/report.md ① ②与「需裁定」段。
+                # #142②【选项丙，2026-10-12 DSH 端】：上面「未采纳」的是**把短路
+                # 写进 _write_2pc.jsonl**——⑧2 不变量 + test_twophase 34/0 证明那条
+                # 改法必须回退。本批改走 issue §3.3(e) 方案 1：**另立**
+                # _write_attempts.jsonl，短路出口由此可观测，而两段式账本零漂移
+                # （test_write_return_shape::g_142_halt_2pc 的 delta==0 一字不动）。
+                # 响应 id 与请求 id 不同源时（如 _gate_audit 的 REJECT 出口：响应 id
+                # 是**负记忆记录 id**，即调用方取回该记录的句柄），账本仍两个 id 都留：
+                # id=请求 id（ctx 同源、四出口一致）、resp_id=调用方看到的 id（可 join）。
+                _append_attempt(cg, ctx["nid"], a, ATTEMPT_SHORT_CIRCUIT,
+                            halted_by=name, out=out)
                 _commit_visibility(cg, out)
                 return out
         # ③ 两段式：闸门**全部放行**（确认要写）→ 先落意图，再执行落盘，
@@ -195,10 +310,20 @@ class WritePipeline:
             # 异常照抛不吞（两段式只记账，不改写既有错误语义）。
             twophase.commit(cg, tok, status=twophase.STATUS_ERROR,
                             reason=type(exc).__name__)
+            # #142②：执行器抛异常也是「一次尝试的出口」——先如实落一行再原样重抛，
+            # 不改既有错误语义（_append_attempt 自身不外抛；该出口无响应体，
+            # 故只有 id、无 resp_id）。
+            _append_attempt(cg, ctx["nid"], a, ATTEMPT_ERROR,
+                            error=type(exc).__name__)
             raise
         ctx["out"] = out
         twophase.commit(cg, tok, status=twophase.STATUS_COMMITTED,
                         reason="executor_ok")
+        # #142②：落盘成功也记一行（尝试账本回答「这次写入停在哪个出口」，
+        # 三态齐全才可对账；两段式账本照旧零漂移）。记账调用落在**语句边界**上
+        # ——上一版把锚点截在 `twophase.commit(...` 那一行、语句还没闭合就追加，
+        # 整份文件因此解析失败（last round: invalid syntax, line 320）。
+        _append_attempt(cg, ctx["nid"], a, ATTEMPT_COMMITTED, out=out)
         for _name, fn in self._after:
             fn(ctx, out)
         _commit_visibility(cg, out)
