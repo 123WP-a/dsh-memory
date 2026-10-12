@@ -58,6 +58,21 @@ VERBS = ("route", "read", "write", "supersede", "forget")
 #: 这是协议对三端客户端最有价值的一条：ok/committed 分离表达「闸门行为 ≠ 工具故障」。
 WRITE_TRIO = ("ok", "id", "committed")
 
+#: **盲区声明**（2026-10-12 设计者裁定，收束 issue #109 题3(b) 的争议）：
+#: 「本路径没有 audit 裁决可透出」这件事，**必须用一个显式标记表达**，而不是
+#: 让 `verdict` 键**缺席**。缺席是歧义源（客户端无法区分「这条路径没有裁决」
+#: 与「这个实现漏了给」）；而**键在场、值为 `None`** 是可机器判读的**盲区声明**：
+#: 「我们知道这里没填」。
+#: ★裁定原文：补 `verdict: None`（键必在场，值表明「本路径无裁决」），使它满足
+#:   `gate_short_circuit`。**这是盲区声明，说明了一个我们知道当前没有填补的内容。**
+#:   而「该分支没有 audit verdict 可透出，硬补一个 verdict 等于编造判据」这个判断
+#:   也是对的 —— **正因如此，我们需要为一个无法识别的内容进行标记。盲区就是为这个
+#:   情况设计的。**
+#: ⇒ 两条不矛盾：**不许编造一个「有值」的裁决**（那条仍然成立），但**必须留标记**
+#:   （本条）。故凡「闸门短路且无 audit 裁决」的形态，`verdict` 一律进 `required`，
+#:   取值 `None` 表示盲区。
+VERDICT_BLINDSPOT = None
+
 #: **工具面 → 动词绑定**（issue #109 题1，2026-10-10 裁定）：写动词的 I/O 形状铁律
 #: 不只约束 `cg(op=write)`，也约束**专用工具面**。`mdcg_remember` 是 hooks 自动记忆
 #: 与直写的主通路（`mcp_server._dispatch` 的 mdcg_remember 分支），它此前**未在协议里
@@ -212,8 +227,10 @@ VERB_SPECS = {
             },
             "gate_hard_reject": {
                 "when": "契约缺失硬拒（依赖声明闸 E050/E051）",
-                "required": WRITE_TRIO + ("gate", "error", "hint"),
-                "optional": ("missing", "verdict"),
+                # 2026-10-12 收束：同属「闸门短路且无 audit 裁决」⇒ verdict 进 required、
+                # 取值 None（盲区声明，见 VERDICT_BLINDSPOT）。实现见 writepipe._gate_deps。
+                "required": WRITE_TRIO + ("gate", "error", "verdict", "hint"),
+                "optional": ("missing",),
             },
             "gate_gated": {
                 "when": "主动遗忘闸（gated=true）替代落盘路径",
@@ -222,12 +239,19 @@ VERB_SPECS = {
             },
             "autonomy_ticket": {
                 "when": "自治档位出单（确认档：变更单入审核队列、本次不落盘）",
-                # issue #109 题3(b)（2026-10-10 裁定）：自治出单**没有 audit
-                # verdict**（它不走 audit 链），硬补 verdict 等于编造判据 ——
-                # 故登记成独立形态：required 取该分支**真实键集**（不含 verdict），
-                # 判据面由 committed=False + moved_to + pid 承担。
+                # issue #109 题3(b)（2026-10-10 裁定）+ **2026-10-12 设计者收束**：
+                # 自治出单**不走 audit 链**，故**没有 audit 裁决可透出**——但这不是
+                # 「不要这个键」，而是「键必在场、值取盲区标记 None」（见 VERDICT_BLINDSPOT）。
+                # 原裁定「硬补 verdict 等于编造判据」指的是**不许编造一个有值的裁决**，
+                # 与「必须留盲区标记」不矛盾；缺席反而是歧义源（分不清「无裁决」与
+                # 「实现漏给」）。故 verdict 进 required，取值 None。
                 "required": WRITE_TRIO + ("moved_to", "pid", "mutation",
-                                          "autonomy", "hint"),
+                                          "autonomy", "verdict", "hint"),
+                # 特征键（**不含 verdict**）：用于识别「本应是本形态、却缺了 verdict」
+                # 的**降级**返回体 —— 缺 verdict 时它仍会命中更松的 committed 形态，
+                # 若不额外判降级，就会「被更松的形态吞掉」（判据静默失效）。
+                # 由 `test_write_return_shape._static_violations` 判红。
+                "fingerprint": ("moved_to", "pid", "mutation", "autonomy"),
                 "optional": (),
             },
         },

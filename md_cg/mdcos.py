@@ -3217,8 +3217,11 @@ class MdCGOS(MdCG):
         aut = {"mode": dec["mode"], "action": dec["action"],
                "action_name": dec["action_name"], "decision": dec["decision"]}
         if dec["decision"] == autonomy_modes.FORBID:
-            return {"ok": False, "id": node_id, "deleted": False,
-                    "moved_to": "autonomy_forbidden", "error": "autonomy_forbid",
+            # 协议 gate_short_circuit：WRITE_TRIO + moved_to + verdict + hint
+            # （此前缺 committed 与 verdict——同族缺口，本批补齐；本路径无校验裁决故 None）
+            return {"ok": False, "id": node_id, "committed": False, "deleted": False,
+                    "moved_to": "autonomy_forbidden", "verdict": None,
+                    "error": "autonomy_forbid",
                     "autonomy": aut, "hint": dec["hint"]}
         pay = autonomy_modes.mutation_payload(
             autonomy_modes.D_DELETE, node_id, after="",
@@ -3228,8 +3231,10 @@ class MdCGOS(MdCG):
             self, autonomy_modes.D_DELETE, node_id, payload=pay,
             layer=e.get("layer") or "knowledge",
             sensitivity=e.get("sensitivity"), info=True)
+        # 协议 gate_short_circuit：补 verdict 键（无校验裁决 ⇒ None，与写链面同口径）
         return {"ok": True, "id": node_id, "committed": False, "deleted": False,
-                "moved_to": "review_queue", "pid": pr["pid"], "mutation": pay,
+                "moved_to": "review_queue", "verdict": None,
+                "pid": pr["pid"], "mutation": pay,
                 "autonomy": aut,
                 "hint": "%s 本次未删除（节点原样在位）：变更单已入审核队列"
                         "（pid=%s，目标 %s）。" % (dec["hint"], pr["pid"], node_id)}
@@ -4246,7 +4251,10 @@ class MdCGOS(MdCG):
         if dec["decision"] == _am.FORBID:
             # 形态对齐原 MERGE 出口（gate / merged_into 两键照带）：调用方按
             # 「gate.reason」取值读判断依据的既有读法不因本闸断裂。
-            return {"verdict": "FORBID", "node_id": node_id, "gate": gate,
+            # 协议 gate_gated：WRITE_TRIO + (gate, verdict)。此前只有 verdict/gate
+            # 而无三键 ⇒ 按 committed 判落盘的调用方读不到键（同族缺口，本批补齐）。
+            return {"ok": False, "id": node_id, "committed": False,
+                    "verdict": "FORBID", "node_id": node_id, "gate": gate,
                     "merged_into": tgt, "moved_to": "autonomy_forbidden",
                     "autonomy": aut, "hint": dec["hint"]}
         # 队列的层闸（MdCGSecure.propose）按**目标节点的真层**校验：合并落点
@@ -4265,7 +4273,9 @@ class MdCGOS(MdCG):
         pr = _am.propose_mutation(self, _am.B_MERGE, tgt, payload=pay,
                                   layer=tlayer,
                                   sensitivity=kw.get("sensitivity"), info=True)
-        return {"verdict": "CONFIRM", "node_id": node_id, "gate": gate,
+        # 协议 gate_gated：同上补三键（ok=True=已受理待审，与写链面口径一致）
+        return {"ok": True, "id": node_id, "committed": False,
+                "verdict": "CONFIRM", "node_id": node_id, "gate": gate,
                 "merged_into": tgt, "moved_to": "review_queue",
                 "pid": pr["pid"], "mutation": pay, "autonomy": aut,
                 "hint": "%s 本次未合并：变更单已入审核队列（pid=%s，目标 %s，"
@@ -4325,7 +4335,8 @@ class MdCGOS(MdCG):
         aut = {"mode": dec["mode"], "action": dec["action"],
                "action_name": dec["action_name"], "decision": dec["decision"]}
         if dec["decision"] == _am.FORBID:
-            return {"ok": False, "verdict": "FORBID", "node_id": node_id,
+            # 协议 gate_gated 需三键中的 id（此处此前只给 node_id）
+            return {"ok": False, "id": node_id, "verdict": "FORBID", "node_id": node_id,
                     "committed": False, "gate": gate,
                     "moved_to": "autonomy_forbidden", "error": "autonomy_forbid",
                     "autonomy": aut, "hint": dec["hint"]}
@@ -4343,7 +4354,8 @@ class MdCGOS(MdCG):
         pr = _am.propose_mutation(self, action, node_id, payload=pay,
                                   layer=layer,
                                   sensitivity=kw.get("sensitivity"), info=True)
-        return {"ok": True, "verdict": "CONFIRM", "node_id": node_id,
+        # 协议 gate_gated 需三键中的 id（同上）
+        return {"ok": True, "id": node_id, "verdict": "CONFIRM", "node_id": node_id,
                 "committed": False, "gate": gate, "moved_to": "review_queue",
                 "pid": pr["pid"], "mutation": pay, "autonomy": aut,
                 "hint": "%s 本次未落盘：变更单已入审核队列（pid=%s，目标 %s）。"

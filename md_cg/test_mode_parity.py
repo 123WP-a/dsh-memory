@@ -641,15 +641,25 @@ _NEG_INJECT = ('    dec = _am.decide(action)\n'
 #: 2026-10-03，与「守卫随实现同批同步」惯例一致（issue52 批同款先例）。
 _KNOWN_EXT_KEYS = ("kept", "truncated")
 
+#: 本批（#109 后续 · 协议形状补齐）的**已知有意变更**：`mdcos` 的 **forget 自治出口**
+#: （带 `deleted` 键的两条分支）补齐协议必需键 `committed`/`verdict`
+#: ——Q 组的 `plan_D`（plan 档出单）读数因此变动，属**有意**。据此按 `deleted` 面定向归一化，
+#: 旧键仍逐位对拍，新增键另以「在场断言」钉住（删新键让对拍变绿 ⇒ 该断言转红）。
+_KNOWN_AUTONOMY_KEYS = ("committed", "verdict")
 
-# 生效条件：item 为观测脚本产出的对拍项（dict，任意形态）时返回其**深拷贝**，且当 item["out"]["consistency"] 为 dict 时从中剔除 _KNOWN_EXT_KEYS 各键；原项一字不动，非 dict 的 out/consistency 形态原样返回。
+
+# 生效条件：item 为观测脚本产出的对拍项（dict，任意形态）时返回其**深拷贝**：① 当 item["out"]["consistency"] 为 dict 时剔除 _KNOWN_EXT_KEYS 各键（cons200 批已知扩展）；② 当 item["out"] 含 `deleted` 键（mdcos forget 自治出口）时剔除 _KNOWN_AUTONOMY_KEYS（本批补齐的协议必需键）；原项一字不动，非 dict 的 out/consistency 形态原样返回。
 def _norm_known_ext(item):
-    """Q 组对拍归一化：只剔「本批已知返回体扩展」键（深拷贝，不动原项）。"""
+    """Q 组对拍归一化：剔「本批已知返回体扩展」键（深拷贝，不动原项）。"""
     it = copy.deepcopy(item)
-    cvd = (it.get("out") or {}).get("consistency") if isinstance(it.get("out"), dict) else None
+    out = it.get("out") if isinstance(it.get("out"), dict) else None
+    cvd = out.get("consistency") if isinstance(out, dict) else None
     if isinstance(cvd, dict):
         for k in _KNOWN_EXT_KEYS:
             cvd.pop(k, None)
+    if isinstance(out, dict) and "deleted" in out:
+        for k in _KNOWN_AUTONOMY_KEYS:
+            out.pop(k, None)
     return it
 
 
@@ -696,6 +706,15 @@ def g_q():
        "Q 已知扩展在场：写链 out 的 consistency 读数（%s）均含本批新增键 "
        "kept/truncated（cons200 契约面；归一化只豁免这两键，旧键仍逐位对拍）"
        % "、".join(cvd_names), cvd_names)
+    _aut_names = [n for n in names
+                  if isinstance(cur["items"][n].get("out"), dict)
+                  and "deleted" in cur["items"][n]["out"]]
+    ok(bool(_aut_names) and all(
+        set(_KNOWN_AUTONOMY_KEYS) <= set(cur["items"][n]["out"])
+        for n in _aut_names),
+       "Q 已知扩展在场：mdcos forget 自治出口（%s）均含本批补齐的协议必需键 "
+       "committed/verdict（归一化只豁免这两键，旧键仍逐位对拍）"
+       % "、".join(_aut_names), _aut_names)
     ok(len(names) >= 10,
        "Q 对拍项覆盖：A/E 全线（A_add/plg_A/E_weights/E_fresh）+ full 档全线"
        "（full_A/full_C/full_B/full_D/full_E_weights/full_E_fresh）+ 矩阵/缺省/"

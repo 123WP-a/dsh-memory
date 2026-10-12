@@ -234,8 +234,10 @@ def _gate_audit(ctx):
     rules, source, perr = audit.resolve_rulebook()
     ctx["policy"] = {"source": source}
     if perr is not None:
+        # 协议 gate_short_circuit 需 verdict：策略不可用 ⇒ 校验根本没跑，故 None
+        # （不编造裁决；键必在场，客户端据此知道「本次无裁决结论」）
         return {"ok": False, "id": ctx["nid"], "committed": False,
-                "moved_to": "policy_unavailable",
+                "moved_to": "policy_unavailable", "verdict": None,
                 "policy": {"source": source}, "error": perr,
                 "hint": "写入被拒（fail-closed）：策略不可用——%s。%s"
                         % (perr["reason"], perr["hint"])}

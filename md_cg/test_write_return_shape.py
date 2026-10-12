@@ -17,6 +17,7 @@ ok/id/committed——「客户端据此判定『是否落盘』而非猜测」�
       python -X utf8 -m md_cg.test_write_return_shape --mutate
 '''
 import argparse
+import ast as _ast
 import io
 import json
 import os
@@ -139,10 +140,15 @@ def _required_of(name):
 
 
 def _static_violations(keys):
-    '''静态面判据（只有键名）：①三键齐 ②命中至少一个声明形态。
+    '''静态面判据（只有键名）：①三键齐 ②命中至少一个声明形态 ③不构成任何形态的**降级**。
 
     返回 (违规列表, 命中的最具体形态名)。「最具体」＝required 键数最多——
     于是「自治出单」不会被更松的 committed 形态吞掉：形态判定可判据、不靠猜。
+
+    ★**降级判据**（2026-10-12 加）：形态声明里的 `fingerprint` 是「本形态的特征键集
+    （不含那条最容易漏的键）」。若某返回体**命中特征键却没满足 required**，说明它
+    本该是本形态、却缺了必需键 —— 缺的那一个键（如 verdict）会让它退回去命中更松的
+    形态（committed），**判据静默失效**。故此处显式判红。
     '''
     ks = set(keys)
     bad = []
@@ -153,6 +159,11 @@ def _static_violations(keys):
     if not hit:
         bad.append('不属任何声明形态')
     best = max(hit, key=lambda n: len(_required_of(n))) if hit else None
+    for name, spec in _write_shapes().items():
+        fp = tuple(spec.get('fingerprint') or ())
+        if fp and set(fp) <= ks and name not in hit:
+            missing = [k for k in _required_of(name) if k not in ks]
+            bad.append('降级：命中 %s 的特征键却缺 %s' % (name, missing))
     return bad, best
 
 
@@ -209,7 +220,10 @@ def g_declared_shapes_full():
         'conflict_deferred': {'must': protocol.WRITE_TRIO + ('moved_to', 'verdict'),
                               'best': 'gate_short_circuit'},
         'review_queue': {'must': _required_of('autonomy_ticket'),
-                         'best': 'autonomy_ticket', 'no': ('verdict',)},
+                         'best': 'autonomy_ticket',
+                         # ★2026-10-12 设计者裁定：verdict **键必在场**、值取盲区标记
+                         # None（`no` 从 ('verdict',) 改为「不许有值」由 G6e' 判）。
+                         'no_value': ('verdict',)},
     }
     seen = {}
     for ln, keys, seg in found:
@@ -229,6 +243,16 @@ def g_declared_shapes_full():
                     ok(k not in keys,
                        'G6e 行 %d（%s）不得含 %s（无该判据不许编造）'
                        % (ln, name, k), sorted(keys))
+                # ★2026-10-12 裁定新增：键**必在场**，但值必须是盲区标记 None。
+                for k in spec.get('no_value', ()):
+                    ok(k in keys,
+                       'G6e\u2032 行 %d（%s）必须含 %s 键（盲区声明：键必在场）'
+                       % (ln, name, k), sorted(keys))
+                    vals = _literal_values_of(seg)
+                    ok(k in vals and vals[k] is None,
+                       'G6e\u2033 行 %d（%s）的 %s 值必须是盲区标记 None'
+                       '（该路径无 audit 裁决，不许编造有值裁决）'
+                       % (ln, name, k), vals.get(k, '<缺键>'))
     for name in anchors:
         ok(name in seen,
            'G6f 锚点 %s 仍存在于工具面分支块（锚点漂移即判红）' % name,
@@ -249,8 +273,10 @@ def g_runtime_shapes():
     ok(best == 'autonomy_ticket',
        'G7d 自治出单分支最具体形态 == autonomy_ticket（不并入 gate_short_circuit）',
        best)
-    ok('verdict' not in b,
-       'G7e 自治出单分支不含 verdict（该路径无 audit 判据，不许编造）', sorted(b))
+    ok('verdict' in b and b.get('verdict') is None,
+       'G7e 自治出单分支 verdict **键必在场且值为盲区标记 None**'
+       '（2026-10-12 裁定：该路径无 audit 裁决 ⇒ 留显式标记，不编造有值裁决）',
+       (sorted(b), b.get('verdict', '<缺键>')))
     ok(b.get('committed') is False and b.get('moved_to') == 'review_queue',
        'G7f 自治出单 = 未落盘 + 去向 review_queue + 可轮询 pid',
        (b.get('committed'), b.get('moved_to'), b.get('pid')))
@@ -348,8 +374,9 @@ def g_tool_face_binding_declared():
        'G10c 协议静态对账 ok=True 且零 shape_errors', rep.get('shape_errors'))
     ok('autonomy_ticket' in protocol.VERB_SPECS['write']['shapes'],
        'G10d write 声明形态含 autonomy_ticket（题3b 落地）')
-    ok('verdict' not in _required_of('autonomy_ticket'),
-       'G10e autonomy_ticket.required 不含 verdict（该路径无 audit 判据）',
+    ok('verdict' in _required_of('autonomy_ticket'),
+       'G10e autonomy_ticket.required **含** verdict（2026-10-12 裁定：该路径无 audit 裁决'
+       ' ⇒ 值取盲区标记 None，但**键必在场**——缺席是歧义源）',
        _required_of('autonomy_ticket'))
 
 
@@ -365,6 +392,113 @@ def g_source_no_silent_gap():
        'G5b 工具面分支内不存在「ok:True 却不给 committed」的返回（防静默回退）', bad)
 
 
+#: protocol.gate_short_circuit（任一 before 闸门短路）的必需键集——本批补齐的判据面。
+_GATE_REQ = protocol.WRITE_TRIO + ('moved_to', 'verdict', 'hint')
+
+
+def _scan_gate_missing(src, markers=('moved_to', 'gate')):
+    '''按 protocol 形状表核对写面返回体（**AST 级**，避免内层字典 `}` 误切）。
+
+    `markers`：认定「本返回属闸门短路类」的键。默认 `moved_to`/`gate`（写链/引擎面）；
+    工具面额外加 `verdict`——因为那里最初的缺口正是**连 moved_to 都没有**的那一态。
+    形状判定（按返回字典键集）：
+      · 含 `gate`     ⇒ gate_gated：需 WRITE_TRIO + (gate, verdict)
+      · 含 `moved_to` ⇒ gate_short_circuit：需 WRITE_TRIO + (moved_to, verdict, hint)
+      · 其余          ⇒ 落盘形态：需 WRITE_TRIO
+    豁免：字面量之后补键的既有写法（如 `out["hint"] = ...`）视为满足（源码全文出现该赋值即豁免）。
+    '''
+    bad = []
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError as exc:
+        return ['源码解析失败：%s' % exc]
+    late = set()
+    for k in ('hint',):
+        if ('["%s"] = ' % k) in src or ("['%s'] = " % k) in src:
+            late.add(k)
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Return) or not isinstance(node.value, _ast.Dict):
+            continue
+        keys = set()
+        for k in node.value.keys:
+            if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                keys.add(k.value)
+        if not (set(markers) & keys):
+            continue
+        if 'gate' in keys:
+            need, shape = protocol.WRITE_TRIO + ('gate', 'verdict'), 'gate_gated'
+        elif 'moved_to' in keys:
+            need, shape = _GATE_REQ, 'gate_short_circuit'
+        else:
+            need, shape = protocol.WRITE_TRIO, 'committed'
+        miss = [k for k in need if k not in keys and k not in late]
+        if miss:
+            bad.append('第 %d 行 [%s] 缺 %s' % (node.lineno, shape, ','.join(miss)))
+    return bad
+
+
+def g_autonomy_gate_shape():
+    '''自治档位短路的两条分支（出单 / 兜底拒绝）须满足 gate_short_circuit 形状。
+
+    背景（#109 三处仍开着之二）：工具面 `mdcg_remember` 的自治档位分支此前**缺 verdict**，
+    不满足 protocol 声明的形状；直写面无校验闸 ⇒ verdict 键必在、值取 None（照
+    writepipe.py:758 既有惯例，不编造裁决）。
+    '''
+    from . import autonomy_modes as _am
+    env_mode = _am.AUTONOMY_ENV_KEYS['mode']
+    cg = _lib('autgate')
+    tool_write(cg, BODY % '初版', 'g1')            # 先造既有节点（触发 C 改写）
+    old = os.environ.get(env_mode)
+    try:
+        os.environ[env_mode] = 'confirm'           # 变更确认档 ⇒ 出单
+        o = tool_write(cg, BODY % '改写版', 'g1')
+        miss = [k for k in _GATE_REQ if k not in o]
+        ok(not miss and o.get('committed') is False
+           and o.get('moved_to') == 'review_queue' and o.get('verdict', '缺键') is None,
+           'G6a 自治出单分支满足 gate_short_circuit（含 verdict 键且为 None、committed=False）',
+           (miss, o.get('committed'), o.get('verdict', '缺键')))
+        os.environ[env_mode] = 'plan'              # 计划档 ⇒ **A 新增** fail-closed
+        o2 = tool_write(cg, BODY % '计划外新增', 'g2')   # 新 id ⇒ A 新增（非改写）
+        miss2 = [k for k in _GATE_REQ if k not in o2]
+        ok(not miss2 and o2.get('committed') is False
+           and o2.get('moved_to') == 'autonomy_forbidden',
+           'G6b 自治兜底拒绝分支（plan 档 A 新增）同样满足该形状（含 verdict 键、committed=False）',
+           (miss2, o2.get('moved_to')))
+    finally:
+        if old is None:
+            os.environ.pop(env_mode, None)
+        else:
+            os.environ[env_mode] = old
+
+
+def g_gate_source_no_gap():
+    '''写动词面三个文件的闸门短路返回，必须含对应形状的必需键。
+
+    面与标记（避免扫到非写面同名字段）：
+      · `mcp_server.py`：**只扫 `mdcg_remember` 工具面分支块**；标记含 `verdict`
+        ——该面最初的缺口正是「连 `moved_to` 都没有」的那一态。
+      · `writepipe.py` / `mdcos.py`：整文件按 `moved_to`/`gate` 标记（两文件均写面）。
+    '''
+    bad = []
+    src = io.open(os.path.join(_HERE, 'mcp_server.py'), encoding='utf-8').read()
+    i = src.find('if name == "mdcg_remember":')
+    j = src.find('if name == "mdcg_recall":')
+    block = src[i:j] if (i >= 0 and j > i) else ''
+    bad += ['mcp_server.py mdcg_remember 块 %s' % s
+            for s in _scan_gate_missing(block,
+                                        markers=('moved_to', 'gate', 'verdict'))]
+    for fn, marks in (('writepipe.py', ('moved_to', 'gate')),
+                      # mdcos 只按 moved_to 标记：其 `remember_gated` 的**内部返回形状**
+                      # （verdict/bypass/gate/written）契约属 #109 第③项「工具面是否受三键
+                      # 铁律约束」的**待裁范围**，本判据不替它裁（不误报、也不擅改）。
+                      ('mdcos.py', ('moved_to',))):
+        s = io.open(os.path.join(_HERE, fn), encoding='utf-8').read()
+        bad += ['%s %s' % (fn, x) for x in _scan_gate_missing(s, markers=marks)]
+    ok(not bad,
+       'G7 写动词面闸门短路返回均含对应形状的必需键（gate_short_circuit = WRITE_TRIO'
+       '+moved_to+verdict+hint；gate_gated = WRITE_TRIO+gate+verdict；防缺键回退）', bad)
+
+
 _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
           g_source_no_silent_gap,
           # issue #109 三题（2026-10-10 裁定）新增判据组：
@@ -372,7 +506,10 @@ _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
           g_declared_shapes_full,         # G6 静态面：按声明形态全量校验工具面
           g_runtime_shapes,               # G7 运行面：成功/自治出单/冲突 DEFER 逐分支
           g_autonomy_forbidden_and_guest,  # G8 自治禁止（plan 档）+ 无权限（异常面）
-          g_gated_envelope_exempt)        # G9 gated 分支显式豁免（双向钉）
+          g_gated_envelope_exempt,        # G9 gated 分支显式豁免（双向钉）
+          # PR #113（2026-10-12 合并，经设计者裁定收束 verdict 语义）：
+          g_autonomy_gate_shape,          # 自治短路两分支满足 gate_short_circuit（verdict 键必在）
+          g_gate_source_no_gap)           # 三写面源码级：闸门短路返回必含对应形状必需键
 
 
 def _run_all():
@@ -417,7 +554,9 @@ def _syn_shape_report(src):
 
 #: 新增判据的定点变异表：每行 = (名称, 合成源码, 期望特征)。
 #: 期望特征键：violations_red（静态面应否报违规）/ best（应为的最具体形态）/
-#:             ticket_verdict_violation（「autonomy_ticket 含 verdict」应否被检出）。
+#:             fabricated_verdict（「autonomy_ticket 形态下 verdict 被编造成有值」
+#:             应否被检出 —— ★2026-10-12 设计者裁定后，**verdict 键必在场、值取 None
+#:             是盲区声明**；仍被禁止的只是**编造一个有值的裁决**）。
 _SYN_SHAPES = (
     ('V0 改前的冲突 DEFER 体（只有 ok/id/verdict/reason）＝本批修掉的那一态',
      'return {"ok": False, "id": nid, "verdict": "DEFER", "reason": "x"}',
@@ -426,18 +565,23 @@ _SYN_SHAPES = (
      'return {"ok": False, "id": nid, "committed": False,'
      ' "moved_to": "conflict_deferred", "verdict": "DEFER", "hint": "h"}',
      {'violations_red': False, 'best': 'gate_short_circuit'}),
-    ('V2 自治出单体（真实 8 键、无 verdict）',
+    ('V2 自治出单体（真实键集，含 verdict: None ＝盲区声明）',
+     'return {"ok": True, "id": nid, "committed": False,'
+     ' "moved_to": "review_queue", "pid": p, "mutation": m,'
+     ' "autonomy": a, "verdict": None, "hint": "h"}',
+     {'violations_red': False, 'best': 'autonomy_ticket',
+      'fabricated_verdict': False}),
+    ('V2b 自治出单体**缺 verdict 键**（盲区未声明 ⇒ 静态面应判红）',
      'return {"ok": True, "id": nid, "committed": False,'
      ' "moved_to": "review_queue", "pid": p, "mutation": m,'
      ' "autonomy": a, "hint": "h"}',
-     {'violations_red': False, 'best': 'autonomy_ticket',
-      'ticket_verdict_violation': False}),
-    ('V3 自治出单体被硬补 verdict（编造判据 ⇒ 应被检出）',
+     {'violations_red': True}),
+    ('V3 自治出单体被**编造有值裁决**（verdict: "DEFER" ⇒ 应被检出）',
      'return {"ok": True, "id": nid, "committed": False,'
      ' "moved_to": "review_queue", "pid": p, "mutation": m,'
-     ' "autonomy": a, "hint": "h", "verdict": "DEFER"}',
+     ' "autonomy": a, "verdict": "DEFER", "hint": "h"}',
      {'violations_red': False, 'best': 'autonomy_ticket',
-      'ticket_verdict_violation': True}),
+      'fabricated_verdict': True}),
     ('V4 自治出单体丢掉 autonomy（形态降级 ⇒ 最具体形态退化为 committed）',
      'return {"ok": True, "id": nid, "committed": False,'
      ' "moved_to": "review_queue", "pid": p, "hint": "h"}',
@@ -453,6 +597,49 @@ _SYN_SHAPES = (
 )
 
 
+def _literal_values(src):
+    '''从源码片段里的字典字面量取 {键: 值}（值只认字面常量；名字→哨兵 `'<expr>'`）。
+
+    输入既可是**合成源码**（`return {...}`），也可是**真实源码里的一个返回片段**
+    （G6 的 `seg`，形如 `{"ok": True, ...}`）。故先试 `return` 包裹，失败则当表达式解析。
+    '''
+    import ast as _ast
+    import textwrap as _tw
+    text = _tw.dedent(src).strip()
+    for candidate in (text, 'return ' + text, 'x = ' + text):
+        try:
+            tree = _ast.parse(candidate)
+        except SyntaxError:
+            continue
+        for node in _ast.walk(tree):
+            d = node.value if (isinstance(node, (_ast.Return, _ast.Assign))
+                               and isinstance(node.value, _ast.Dict)) else (
+                node if isinstance(node, _ast.Dict) else None)
+            if d is None:
+                continue
+            out = {}
+            for k, v in zip(d.keys, d.values):
+                if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                    out[k.value] = v.value if isinstance(v, _ast.Constant) else '<expr>'
+            if out:
+                return out
+    return {}
+
+
+#: G6 的片段级取值：对真实源码里的返回片段做同样的事（供 `no_value` 判据用）。
+_literal_values_of = _literal_values
+
+
+def _fabricated_verdict(ks):
+    '''autonomy_ticket 形态下 verdict 是否为**编造的有值裁决**。
+
+    判据（2026-10-12 设计者裁定）：该形态 required 含 verdict，取值必须是盲区
+    标记 None；**任何非 None 值都是编造**（该路径无 audit 裁决可透出）。
+    '''
+    return ('verdict' in ks and ks['verdict'] is not None) if isinstance(ks, dict) \
+        else False
+
+
 def _run_shape_mutations():
     print('!! 新增判据定点变异自证（G6/G7 静态+运行面）')
     bad = 0
@@ -461,10 +648,11 @@ def _run_shape_mutations():
         got_red = bool(rows) and bool(rows[0][0])
         got_best = rows[0][1] if rows else None
         ks = rows[0][2] if rows else []
-        got_tv = (got_best == 'autonomy_ticket' and 'verdict' in ks)
+        got_fv = _fabricated_verdict(_literal_values(src))
         # 运行面判据吃**显式真实值的 body**（键集 fromkeys 会把值全变 None，
         # 那是假读：committed=None 既非 True 也非 False，moved_to=None 会被
         # 误当「无去向」）。故用表里给的 body；未给则跳过该项。
+
         _body = expect.get('body')
         rt_bad = _runtime_violations(_body)[0] if _body is not None else []
         got_rt = bool(rt_bad)
@@ -475,10 +663,10 @@ def _run_shape_mutations():
         if 'best' in expect:
             checks.append(('最具体形态=%s' % expect['best'],
                            got_best == expect['best']))
-        if 'ticket_verdict_violation' in expect:
-            checks.append(('ticket 带 verdict 被检出=%s'
-                           % expect['ticket_verdict_violation'],
-                           got_tv == expect['ticket_verdict_violation']))
+        if 'fabricated_verdict' in expect:
+            checks.append(('autonomy_ticket 编造有值裁决被检出=%s'
+                           % expect['fabricated_verdict'],
+                           got_fv == expect['fabricated_verdict']))
         if 'runtime_red' in expect:
             checks.append(('运行面判红=%s' % expect['runtime_red'],
                            got_rt == expect['runtime_red']))
@@ -495,6 +683,22 @@ def _run_shape_mutations():
     return bad
 
 
+#: 本批（gate_short_circuit 形状）的合成变异：喂 `_scan_gate_missing`，判别力必须成立。
+_SYN_GATE = (
+    ('M4 合成合规（三键 + moved_to + verdict + hint）',
+     'return {"ok": False, "id": nid, "committed": False,'
+     ' "moved_to": "conflict_deferred", "verdict": "DEFER", "hint": "x"}', False),
+    ('M5 合成缺 verdict（本批修掉的那一态）',
+     'return {"ok": True, "id": nid, "committed": False,'
+     ' "moved_to": "review_queue", "hint": "x"}', True),
+    ('M6 合成缺 hint（形状要求的下一步说明）',
+     'return {"ok": False, "id": nid, "committed": False,'
+     ' "moved_to": "x", "verdict": None}', True),
+    ('M7 合成缺 committed（原冲突 DEFER 分支那一态）',
+     'return {"ok": False, "id": nid, "verdict": "DEFER", "reason": "r"}', True),
+)
+
+
 def _run_mutations():
     print('!! 定点变异自证：给 G5b 判据体喂合成源码，判别力必须成立')
     bad = 0
@@ -508,6 +712,19 @@ def _run_mutations():
             print('        预期有红=%s 实际=%s' % (expect_red, got))
     print('')
     bad += _run_shape_mutations()
+    print('!! 定点变异自证：给 G7 判据体喂合成源码，判别力必须成立')
+    for name, src, expect_red in _SYN_GATE:
+        # AST 判据要求 return 处于函数体内 ⇒ 合成样本统一包一层 def
+        wrapped = 'def _f():' + chr(10) + chr(10).join(
+            '    ' + l for l in src.split(chr(10)))
+        got = _scan_gate_missing(wrapped, markers=('moved_to', 'gate', 'verdict'))
+        good = (bool(got) == expect_red)
+        if not good:
+            bad += 1
+        print('  %s %s' % ('PASS' if good else 'FAIL', name))
+        if not good:
+            print('        预期有红=%s 实际=%s' % (expect_red, got))
+    print('')
     return bad
 
 

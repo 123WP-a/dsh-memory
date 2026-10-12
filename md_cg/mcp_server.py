@@ -3655,9 +3655,12 @@ def _dispatch(cg, name, args):
                     "action_name": _dec["action_name"],
                     "decision": _dec["decision"]}
             if _dec["decision"] == _am.FORBID:
+                # 同属 gate_short_circuit 形态（兜底拒绝分支）：补 verdict 键，
+                # 与出单分支同口径——直写面无校验闸，故取 None（不编造裁决）。
                 return {"ok": False, "id": nid, "committed": False,
                         "moved_to": "autonomy_forbidden",
                         "error": "autonomy_forbid", "autonomy": _aut,
+                        "verdict": None,
                         "hint": _dec["hint"]}
             _meta = {k: a[k] for k in
                      ("tags", "condition_space", "verification_basis",
@@ -3682,14 +3685,19 @@ def _dispatch(cg, name, args):
                                        layer=_layer,
                                        sensitivity=a.get("sensitivity"),
                                        info=True)
-            # issue #109 题3(b)（2026-10-10 裁定）：本分支 = 协议声明形态
-            # autonomy_ticket（自治档位出单）。该路径**没有 audit verdict**
-            # ——硬补一个 verdict 等于编造判据，故协议把「自治出单」登记成
-            # **独立形态**（protocol.VERB_SPECS["write"]["shapes"]["autonomy_ticket"]，
-            # required 取本分支真实键集、**不含 verdict**）；判据面由
-            # committed=False + moved_to + pid（可轮询的入队句柄）承担。
+            # 自治档位出单属 protocol.gate_short_circuit 形态：WRITE_TRIO +
+            # moved_to + verdict + hint。**verdict 键必在场**——直写面不跑校验闸
+            # （audit 在 gated 分支的链上），本路径**没有 audit 裁决可透出**，故取
+            # None。
+            # ★2026-10-12 设计者裁定（对 #109 题3(b) 的收束）：None 不是「编造裁决」，
+            # 而是**盲区声明**——「我们知道这里没填」。原裁定「硬补 verdict 等于编造
+            # 判据」的判断仍然成立（那说的是编造一个**有值**的裁决）；正因如此才需要
+            # 为「无法识别/未填」这件事**留一个显式标记**，而盲区就是为这种情况设计的。
+            # 形态见 protocol.VERB_SPECS["write"]["shapes"]["autonomy_ticket"]
+            # （required 含 verdict；None 的语义由 protocol.VERDICT_BLINDSPOT 声明）。
             return {"ok": True, "id": nid, "committed": False,
-                    "moved_to": "review_queue", "pid": _pr["pid"],
+                    "moved_to": "review_queue", "verdict": None,
+                    "pid": _pr["pid"],
                     "mutation": _pay, "autonomy": _aut,
                     "hint": "%s 本次未落盘：变更单已入审核队列（pid=%s，目标 %s）。"
                             % (_dec["hint"], _pr["pid"], nid)}
@@ -3711,17 +3719,20 @@ def _dispatch(cg, name, args):
                          derived_from=_split_ids(a.get("derived_from")),
                          relation=a.get("relation"))
         if written is None:
-            # issue #109 题2（2026-10-10 裁定）：冲突 DEFER 同属「未落盘」，与闸门
-            # 短路分支**同口径**补齐三键铁律与去向词（此前只有 ok/id/verdict/reason
-            # ——判 committed 的调用方拿到的是缺键，只能猜）。
-            # conflict_deferred 语义＝**冲突导致 defer：既未落盘、也未入队**
-            # （与 review_queue「已入队待裁」区分：本条**不给 pid**，调用方据此
-            # 不轮询队列）。hint 同补——gate_short_circuit 形态的 required 含 hint。
+            # 冲突 DEFER 同属 protocol.gate_short_circuit 形态：WRITE_TRIO +
+            # moved_to + verdict + hint。此前只有 ok/id/verdict/reason ⇒ 判 committed
+            # 的调用方读不到「未提交」，也读不到去向与下一步。
+            # 语义（mdcg.py:2192 生效条件 + :2319-2321）：on_conflict=defer 时
+            # REJECT/BLINDSPOT **既不落盘也不入队**——故去向**不可**写 review_queue，
+            # 用 conflict_deferred 表达「被冲突闸挡下、未进任何队列」。
+            # （去向词：2026-10-12 设计者裁定为 conflict_deferred。）
             return {"ok": False, "id": nid, "committed": False,
-                    "moved_to": "conflict_deferred", "verdict": "DEFER",
+                    "moved_to": "conflict_deferred",
+                    "verdict": "DEFER",
                     "reason": "节点间冲突检测未通过（on_conflict=defer）",
-                    "hint": "冲突未落盘也未入队：改正文消解冲突，或显式 "
-                            "on_conflict=record 记录放行后重写"}
+                    "hint": "本次未落盘、未入队（defer 语义）：如需落盘请显式处置冲突——"
+                            "修正正文后重写 / on_conflict=reject 取明确拒绝 / "
+                            "override=true 覆写（需相应权限）"}
         # issue #109 相邻面：工具面**同一返回体**在闸门短路分支给 committed=False，
         # 成功分支此前却不给 committed ⇒ 判 committed 的调用方会把「成功」读成
         # 「未提交」（与 #109 报的「把待审读成已提交」是同一处的两面）。
