@@ -151,12 +151,19 @@ def main():
     gate = os.path.join(HERE, "scripts", "interop_gate.py")
     with tempfile.TemporaryDirectory() as td:
         vp = os.path.join(td, "verdict.json")
-        ok_v = dict(base, verdict="pass", valid=True, assertions_ok=True,
-                    failure_reason=None, passed=9, failed=0)
+        # issue #126 新契约：真放行须有合法冻结凭证（外部锚 A3）作为前置——
+        # 用被测代码自己的 freeze() 产出真凭证（digest 即本轮判据面指纹），
+        # 再令 verdict 声明的 verifier_fingerprint == 该 digest。
+        cred = freeze("zz-guard-j4", out_dir=td)
+        frz_fp = os.path.join(td, "frozen.json")
+        ok_v = dict(base, verifier_fingerprint=cred["digest"], verdict="pass",
+                    valid=True, assertions_ok=True, failure_reason=None,
+                    passed=9, failed=0)
         json.dump(ok_v, open(vp, "w", encoding="utf-8"), ensure_ascii=False)
         r = subprocess.run([sys.executable, gate, "--path", vp],
                            capture_output=True, text=True, encoding="utf-8")
-        check("pass+valid → exit 0（放行）", r.returncode == 0, r.stdout)
+        check("凭证齐备 + pass/valid → exit 0（放行）", r.returncode == 0,
+              r.stdout)
         json.dump(dict(base), open(vp, "w", encoding="utf-8"),
                   ensure_ascii=False)
         r = subprocess.run([sys.executable, gate, "--path", vp],
@@ -170,6 +177,29 @@ def main():
         r = subprocess.run([sys.executable, gate, "--path", vp],
                            capture_output=True, text=True, encoding="utf-8")
         check("旧版产物缺契约字段 → exit 3（拒绝猜测）", r.returncode == 3)
+
+        # issue #126 A3 外部锚承重墙：无凭证 / 伪造凭证 / 凭证不可解析 /
+        # 凭证缺 digest ⇒ 一律拒收（非 0），fail-closed——没有外部锚即未互验。
+        json.dump(ok_v, open(vp, "w", encoding="utf-8"), ensure_ascii=False)
+        os.remove(frz_fp)
+        r = subprocess.run([sys.executable, gate, "--path", vp],
+                           capture_output=True, text=True, encoding="utf-8")
+        check("无冻结凭证 → 拒收（非 0）", r.returncode != 0, r.stdout)
+        json.dump({"digest": "0" * 64}, open(frz_fp, "w", encoding="utf-8"))
+        r = subprocess.run([sys.executable, gate, "--path", vp],
+                           capture_output=True, text=True, encoding="utf-8")
+        check("伪造凭证（digest 不符）→ 拒收（非 0）", r.returncode != 0,
+              r.stdout)
+        with open(frz_fp, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        r = subprocess.run([sys.executable, gate, "--path", vp],
+                           capture_output=True, text=True, encoding="utf-8")
+        check("凭证不可解析 → 拒收（非 0）", r.returncode != 0, r.stdout)
+        json.dump({"iter_id": "zz", "files": []}, open(frz_fp, "w",
+                  encoding="utf-8"))
+        r = subprocess.run([sys.executable, gate, "--path", vp],
+                           capture_output=True, text=True, encoding="utf-8")
+        check("凭证缺 digest → 拒收（非 0）", r.returncode != 0, r.stdout)
 
     print("[7] make_verdict 全链（新字段经双门禁落盘）")
     v3 = make_verdict(iter_id="t", verifier_instance="v",
