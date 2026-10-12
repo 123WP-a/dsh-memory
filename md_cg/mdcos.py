@@ -64,6 +64,42 @@ _FIX_RE = re.compile(
     re.I | re.M)
 
 RRF_K = 60          # RRF 常数
+
+# ---- issue #130：实体路（`_path_entity`）的**有判别力**打分 -------------------
+# 缺陷现场：原实现命中即 `out.append((node, 1.0))`——全路同分，其"排序"只由
+# `(-score, -importance, id)` 的兜底键决定＝枚举序（写入序），不携带相关性，
+# 却仍以 w/(K+rank) 全额进 RRF 融合 ⇒ 标签命中获得与「正文相关」同等票权。
+# 修法①：按 tag 与 query 的**匹配质量**给分（完全相等 > tag 是 query 的子串且
+# 按覆盖长度分级 > query 是 tag 的子串），多 tag 命中轻微累加。分数只用于**本路
+# 内部排序**（融合层只吃名次），故取相对量级即可，无需归一。
+TAG_AFFINITY_EXTRA = 0.05   # 第 2 个及以后命中 tag 的累加步长（防条数支配排序）
+
+
+def _tag_affinity(tags, query: str) -> float:
+    """实体路的匹配强度（> 0 才算命中）。纯函数、可复算、零 IO。
+
+    生效条件：tags 可迭代且 query 非空；命中口径与旧实现逐字一致
+    （`len(t) >= 2` ∧ 「t 在 query 中 ∨ query 在 t 中」），只把布尔命中换成强度。
+    不适用条件：不做语义等价/同义判断——词面之外一律不算命中（口径不变）。
+    """
+    q = str(query or "")
+    affs = []
+    for t in tags:
+        t = str(t)
+        if len(t) < 2 or not q:
+            continue
+        if t == q:
+            affs.append(1.0)
+        elif t in q:
+            affs.append(0.5 + 0.5 * (len(t) / max(len(q), 1)))
+        elif q in t:
+            affs.append(0.5 * (len(q) / max(len(t), 1)))
+    if not affs:
+        return 0.0
+    affs.sort(reverse=True)
+    return affs[0] + TAG_AFFINITY_EXTRA * (len(affs) - 1)
+
+
 DEFAULT_BUDGET = 1200  # recall 默认 token 预算
 # recall 单条上限：超预算的条目按此截断纳入（而非丢弃），避免"逆向淘汰"。
 # 0 = 关闭截断，回到"超大一律跳过"的旧行为。
@@ -1276,7 +1312,8 @@ class MdCGOS(MdCG):
         out = []
         for e in entries:
             tags = [str(t) for t in (e.get("tags") or [])]
-            if any(t in query or query in t for t in tags if len(t) >= 2):
+            aff = _tag_affinity(tags, query)      # issue #130：布尔命中 → 匹配强度
+            if aff > 0.0:
                 fm, c = self._read(e)
                 if c is None:
                     continue
@@ -1284,7 +1321,7 @@ class MdCGOS(MdCG):
                 if c is None:
                     continue
                 out.append(({"id": fm.get("id") or e["path"], "frontmatter": fm,
-                             "content": c, "path": e["path"]}, 1.0))
+                             "content": c, "path": e["path"]}, round(aff, 6)))
         return out
 
 # 生效条件：当 seeds 非空时，仅取前 5 个种子，种子的 edges 取法为：其 id 在 entries 的 path 文件名映射（by_id）中时经 self._read(e_seed) 读 frontmatter（读缓存覆盖——get 裸 open 不在缓存包装面），不在映射中（fm.id≠文件名等形态）时回落 self.get(n["id"])（旧口径，冷路径）；从 edges 取 target（dict 取 target，否则 str(edge)），若 target 在 entries 映射中且不在 seed_ids 中则读取并追加分数 s*0.5；seeds 为空返回 []；depth 默认 1 但本段未使用；
@@ -1813,6 +1850,14 @@ class MdCGOS(MdCG):
         rrf, prov = {}, {}
         per_path = {}
         ro = set(recall_only or ())
+        no_rank_signal = []          # 名次不可信的路（分数无判别力，见循环内判据）
+        # 契约的**生效条件**：只在「多路竞争」时启用（≥2 路实际产出候选）。
+        # 单路时该路的名次就是唯一排序依据——没有别的路会被它挤掉，此时
+        # `(-score, -importance, id)` 兜底序是**既有契约**：守卫
+        # `test_bm25.test_top50_boundary_ties_and_no_zero_score_padding` 逐字要求
+        # 「单路 bm25 全同分时 importance 高者居首」⇒ 单路不得被本契约改写。
+        _active_paths = [n for n, s in ranked.items() if s and n not in ro]
+        _gate_on = len(_active_paths) >= 2
         for name, scored in ranked.items():
             # 终键 nid：此处 rank 直接进 RRF（w/(K+rank)），并列若回落输入序
             # 会改变融合分——同分同 importance 必须由 nid 定序才可复算。
@@ -1821,6 +1866,18 @@ class MdCGOS(MdCG):
                             str(x[0].get("id") or "")))
             per_path[name] = len(scored)
             if name in ro:
+                continue
+            # 名次可信度契约（issue #130）：RRF 吃的是**名次**，其隐含前提是该路
+            # 的排序携带相关性信息。一路若对 ≥2 个候选给出**同一个分数**，其序
+            # 只由 `(-score, -importance, id)` 的兜底键决定＝枚举序（写入序）——
+            # 此时以 w/(K+rank) 全额投票就是「常量分冒充名次」（entity 旧实现
+            # 恒 1.0；temporal 超视界被 floor 夹成同值，同一类缺陷）。
+            # 契约：这类路**本轮不参与打分**，退回 recall_only 语义（只补候选池、
+            # 不改排序），并在 meta.no_rank_signal / path_fingerprint 留痕可审计。
+            _scores = [float(_s) for _n, _s in scored]
+            if _gate_on and len(_scores) >= 2 and len(set(_scores)) == 1:
+                no_rank_signal.append(name)
+                ro.add(name)
                 continue
             w = float((path_weights or {}).get(name, 1.0))
             for rank, (node, _s) in enumerate(scored[:50], 1):
@@ -1963,7 +2020,8 @@ class MdCGOS(MdCG):
             "fused": len(results),
             "judge_ranking": bool(judge and judge_ranking),
             "judge_filtered": filtered,
-            "early_stopped": early_stopped}
+            "early_stopped": early_stopped,
+            "no_rank_signal": sorted(no_rank_signal)}
         _path_fp = build_path_fingerprint(selection=_fp_selection,
                                           recursion=_fp_recursion,
                                           paths=_fp_paths)
@@ -1979,6 +2037,7 @@ class MdCGOS(MdCG):
                          "judge_ranking": bool(judge and judge_ranking),
                          "judge_filtered": filtered,
                          "early_stopped": early_stopped,
+                         "no_rank_signal": sorted(no_rank_signal),
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,
@@ -1991,6 +2050,7 @@ class MdCGOS(MdCG):
                          "judge_ranking": bool(judge and judge_ranking),
                          "judge_filtered": filtered,
                          "early_stopped": early_stopped,
+                         "no_rank_signal": sorted(no_rank_signal),
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,

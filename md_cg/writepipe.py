@@ -138,28 +138,48 @@ class WritePipeline:
         if not a.get("layer") and (a.get("content_kind") or "").strip() == "work_wip":
             a = dict(a)
             a["layer"] = "contextual"
+        # #142①（2026-10-12 DSH 端）：id 的铸造**前移到本闸之前**——超限出口同受
+        # WRITE_TRIO 铁律约束（protocol.py:59「任一形态必含 ok/id/committed」，
+        # 客户端据此判定是否落盘）；且 id 必须与 ctx 同源，否则同一请求两条出口
+        # 报不同 id。铸造的唯一实现仍是 mdcg.mint_auto_id（见下方 B1），此处只提前
+        # 调用，不另写判据。
+        from .mdcg import mint_auto_id
+        _nid = a.get("node_id") or mint_auto_id(cg)
         # ---- issue #82.3（同批）：写入硬上限（全 kind 统一）。
         # 判据：存量最大 463KB、P999=17KB ⇒ 1 MiB 约 60 倍余量、零存量阻断。
         # 超限如实报（当前大小 + 上限），不截断、不静默。
+        # #142①：返回体补齐 id/committed（三键铁律）＋ gate/hint，命中协议声明
+        # 形态 gate_hard_reject（protocol.VERB_SPECS["write"]["shapes"]）——
+        # 此前该出口只有 ok/bytes/error/limit/verdict，三键缺二、不属任何声明形态。
         _wc = a.get("content") or ""
         _wbytes = len(_wc.encode("utf-8")) if isinstance(_wc, str) else 0
         if _wbytes > MAX_WRITE_BYTES:
-            return {"ok": False, "error": "content 超过写入硬上限（issue #82.3）",
+            return {"ok": False, "id": _nid, "committed": False,
+                    "gate": "writelimit_size",
+                    "error": "content 超过写入硬上限（issue #82.3）",
                     "bytes": _wbytes, "limit": MAX_WRITE_BYTES,
                     "verdict": {"state": "REJECT", "kind": (a.get("content_kind") or "text"),
-                                "evidence": "content %d 字节 > 上限 %d" % (_wbytes, MAX_WRITE_BYTES)}}
+                                "evidence": "content %d 字节 > 上限 %d" % (_wbytes, MAX_WRITE_BYTES)},
+                    "hint": ("写入被拒（硬上限，不是工具故障）：正文 %d 字节 > 上限 %d 字节。"
+                             "本上限全 content_kind 统一（issue #82.3），重试同样结果——"
+                             "请缩短正文后重写。" % (_wbytes, MAX_WRITE_BYTES))}
         # B1（2026-09-30）：自动 id 的铸造**只有一份实现**（mdcg.mint_auto_id）
         # ——原先此处 `"mem_" + 毫秒` 与 mcp_server 的 mdcg_remember 分支各写一份，
         # 同毫秒自动写入铸出同一 id，被 add 的 upsert 语义静默顶替（无失败信号）。
         # 本处只委托，不复制判据。
-        from .mdcg import mint_auto_id
-        ctx = {"cg": cg, "a": a,
-               "nid": a.get("node_id") or mint_auto_id(cg),
-               "verdict": None, "cvd": None}
+        ctx = {"cg": cg, "a": a, "nid": _nid, "verdict": None, "cvd": None}
         for name, fn in self._before:
             out = fn(ctx)
             if out is not None:
                 ctx["halted_by"] = name
+                # #142②（2026-10-12 DSH 端）**未采纳**：原拟在短路出口补两段式账
+                # （修前只覆盖「全放行」与 gated 两段），使 abort 也可对账。
+                # 实测该改法与既有**已被守卫钉死**的不变量冲突：
+                # md_cg/test_twophase.py:9/⑧2「未落盘的分支（闸门拒绝 / 入队）
+                # 不产生 intent——没打算写就不记账」。改后 test_twophase 34/1（⑧2 红），
+                # 而该守卫文件不在本件写面（task-35：写面仅 writepipe.py + 本批守卫）
+                # ⇒ 按纪律**回退改动、把口径冲突上报**，不在本件单方面改语义。
+                # 详见 _team/writepipe/report.md ① ②与「需裁定」段。
                 _commit_visibility(cg, out)
                 return out
         # ③ 两段式：闸门**全部放行**（确认要写）→ 先落意图，再执行落盘，

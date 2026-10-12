@@ -3442,7 +3442,7 @@ _MDCG_OP_REQUIRE = {
     "mdcg_rejected": "write", "mdcg_unresolved": "write",
     "mdcg_propose": "write", "mdcg_review_decide": "write",
     "mdcg_forget": "write", "mdcg_restore": "write",
-    "mdcg_protect": "write", "mdcg_ingest": "write",
+    "mdcg_ingest": "write",
     "mdcg_consistency": "write",
     # 读面
     "mdcg_recall": "read", "mdcg_search": "read", "mdcg_get": "read",
@@ -3459,6 +3459,12 @@ _MDCG_OP_REQUIRE = {
     # cg 面是 designer 专属 op（`cg(op="protect")` 前置 require_op("protect")）
     # ⇒ 任何 can_write 角色可经工具面 action=snapshot 真落盘 _protected_history
     # 且（修前）零审计，stats/check 亦回带保护面盘点。两条出口对齐到 protect。
+    #
+    # issue #118（2026-10-11）：本键**在本映射中只允许出现一次**——修前它另有一处
+    # 陈旧重复项（"mdcg_protect": "write"），Python 字典**后者胜**故运行期口径正确，
+    # 但**安全属性完全依赖书写次序**：任何人重排两行即静默回退为粗粒度 write。
+    # 现陈旧重复项已删；「唯一性」不再靠人眼，由 `scripts/check_duplicate_keys.py`
+    # 全仓 AST 守卫钉住（同键两次取值不同 ⇒ 非零退出）。改口径请只改这一处。
     "mdcg_protect": "protect",
     # N227（2026-09-28）：演化账本是治理面（行含节点 id 与自由文本），此前映射
     # read（guest 可达）而规范出口 `cg(op="evolution")` 要 op "evolution"。

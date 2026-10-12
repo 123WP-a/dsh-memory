@@ -499,6 +499,103 @@ def g_gate_source_no_gap():
        '+moved_to+verdict+hint；gate_gated = WRITE_TRIO+gate+verdict；防缺键回退）', bad)
 
 
+# ---------------------------------------------------------------- #142（2026-10-12 DSH 端）
+#: #142 定点变异的注入开关（默认全关；只在 --mutate 的自证段打开）。
+_142_MUT = {'oversize_keys': False, 'halt_2pc': False}
+
+
+def _ledger_rows(cg):
+    '''两段式账本行数（#142② 的覆盖判据用）。'''
+    from . import twophase
+    p = twophase.log_path(cg)
+    if not os.path.isfile(p):
+        return 0
+    with io.open(p, encoding='utf-8') as f:
+        return sum(1 for l in f if l.strip())
+
+
+def g_142_oversize_trio():
+    '''#142①：**超限出口**必须满足 WRITE_TRIO 铁律。
+
+    这是「写返回体形状」此前**未被覆盖的出口**——它不经任何 before 闸，直接在
+    execute 入口返回；修前只有 ok/bytes/error/limit/verdict（三键缺二，且不属任何
+    声明形态）。判据真源＝protocol.WRITE_TRIO + VERB_SPECS['write']['shapes']。
+    '''
+    from . import writepipe
+    cg = _lib('o142')
+    big = '# 功能名：超限' + chr(10) + chr(10) + '# 生效条件：PASSED' + chr(10) \
+        + ('x' * (writepipe.MAX_WRITE_BYTES + 8))
+    out = writepipe.default_pipeline().execute(cg, _args(big, 'o142_big'))
+    if _142_MUT['oversize_keys']:          # 变异：还原修前返回体
+        out = {k: v for k, v in out.items() if k not in ('id', 'committed')}
+    miss = [k for k in protocol.WRITE_TRIO if k not in out]
+    ok(not miss, 'H1a 超限出口含三键（ok/id/committed）', sorted(out))
+    ok(bool(out.get('id')), 'H1b 超限出口带非空 id（与 ctx 同源）', out.get('id'))
+    ok(out.get('committed') is False, 'H1c 超限 => committed is False', out.get('committed'))
+    bad, best = _static_violations(sorted(out))
+    ok(not bad, 'H1d 超限出口命中协议声明形态（静态判据）', (bad, best))
+    ok(best == 'gate_hard_reject', 'H1e 命中 gate_hard_reject（硬拒＋结构化 error）', best)
+    src = io.open(os.path.join(_HERE, 'writepipe.py'), encoding='utf-8').read()
+    ok('return {"ok": False, "error": "content 超过写入硬上限' not in src,
+       'H1f 源码级：修前的无三键超限出口字面量已不存在',
+       '（若本项红说明被回退）')
+
+
+def g_142_halt_2pc():
+    '''#142②：**短路出口零两段式覆盖**——现状如实钉住 + 口径冲突标注（本件未改）。
+
+    实测：audit REJECT / 缺必需要素等短路出口落 **0** 条两段式记录（twophase 只覆盖
+    「全放行」与 gated 两段）；但 `md_cg/test_twophase.py:9/⑧2` 把「未落盘的分支
+    （闸门拒绝 / 入队）**不产生 intent**——没打算写就不记账」钉成不变量，而该守卫
+    文件**不在本件写面**（task-35：写面仅 writepipe.py + 本批守卫）⇒ 本件**回退了**
+    「短路补记账」的改法（回退前 test_twophase 34/1，⑧2 红），改为在此如实钉现状。
+    若将来裁定「短路也要落账」，本组断言会转红——那正是升级断言的信号。
+    '''
+    from . import writepipe
+    cg = _lib('h142')
+    cases = [
+        ('audit REJECT·禁表词',
+         _args('# 功能名：禁' + chr(10) * 2 + '# 生效条件：PASSED' + chr(10)
+               + '内容 FORBIDDEN_WORD 在此', 'h_rej')),
+        ('audit REJECT·缺必需要素',
+         _args('# 功能名：缺' + chr(10) * 2 + '正文无必需要素词', 'h_miss')),
+        ('gated 闸（自记账）', dict(_args(BODY % '遗忘闸', 'h_gated'), gated=True)),
+    ]
+    for label, a in cases:
+        before = _ledger_rows(cg)
+        writepipe.default_pipeline().execute(cg, a)
+        delta = _ledger_rows(cg) - before
+        want = 2 if label.startswith('gated') else 0
+        ok(delta == want,
+           'H2 %s ⇒ 账本 +%d（现状口径：短路不记账 / gated 自记一对）' % (label, want),
+           'delta=%d（期望 %d）' % (delta, want))
+    rep = cg.reconcile_writes()
+    ok(rep.get('unpaired') == 0, 'H2d 两段式对账零悬空（unpaired=0）', rep)
+    print('        [需裁定] ②：短路出口零账（本件未改，因与 test_twophase ⑧2 的不变量冲突）——改法已写进 _team/writepipe/report.md，待 Lead/设计者裁定')
+
+
+def g_142_two_path_divergence():
+    '''#142④：两条写通路（mdcg_remember 直写 vs cg(op=write) 走 writepipe）结论相反。
+
+    **本守卫只如实记录现状**：统一判据的改动点落在 `mcp_server.py:3571` 分支
+    （本件**只读**，见 task-35 写面约束）⇒ 不在本守卫红绿面内。若 Lead 后续统一了
+    通路，H3a 会转红——那正是「把断言升级为『两通路一致』」的信号。
+    '''
+    cg = _lib('twopath142')
+    text = ('# 功能名：同一内容' + chr(10) * 2 + '# 生效条件：PASSED' + chr(10)
+            + '内容 FORBIDDEN_WORD 在此')
+    o_t = mcp_server.call_tool(cg, 'mdcg_remember', _args(text, 'tp_tool'))
+    o_v = mcp_server.call_tool(cg, 'cg', dict(op='write', **_args(text, 'tp_verb')))
+    ok(bool(o_t.get('committed')) != bool(o_v.get('committed')),
+       'H3a 现状：同一内容两通路结论相反（报告已记录；统一需改 mcp_server）',
+       (o_t.get('committed'), o_v.get('committed')))
+    ok(not [k for k in protocol.WRITE_TRIO if k not in o_t]
+       and not [k for k in protocol.WRITE_TRIO if k not in o_v],
+       'H3b 两通路返回体各自满足三键铁律（形状面已覆盖）',
+       (sorted(o_t), sorted(o_v)))
+    print('        [需协调] 统一判据的改动点在 mcp_server.py:3571（本件只读）——'
+          '现状：工具面落盘 / 动词面 REJECT')
+
 _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
           g_source_no_silent_gap,
           # issue #109 三题（2026-10-10 裁定）新增判据组：
@@ -509,7 +606,11 @@ _CASES = (g_tool_success, g_tool_pending, g_machine_decidable, g_verb_face,
           g_gated_envelope_exempt,        # G9 gated 分支显式豁免（双向钉）
           # PR #113（2026-10-12 合并，经设计者裁定收束 verdict 语义）：
           g_autonomy_gate_shape,          # 自治短路两分支满足 gate_short_circuit（verdict 键必在）
-          g_gate_source_no_gap)           # 三写面源码级：闸门短路返回必含对应形状必需键
+          g_gate_source_no_gap,           # 三写面源码级：闸门短路返回必含对应形状必需键
+          # #142（2026-10-12 DSH 端）新增判据组：
+          g_142_oversize_trio,            # H1 超限出口（此前未覆盖的出口）三键+声明形态
+          g_142_halt_2pc,                 # H2 短路出口两段式覆盖（恰一对 intent/outcome）
+          g_142_two_path_divergence)      # H3 两通路相反结论（现状记录·待 Lead 协调）
 
 
 def _run_all():
@@ -699,6 +800,62 @@ _SYN_GATE = (
 )
 
 
+def _run_142_mutations():
+    '''#142 的两条定点变异（都作用于**被验实现**，不是断言侧）。'''
+    print('!! #142 定点变异自证（短路两段式 / 超限三键）')
+    bad = 0
+    from . import twophase
+    _p0, _f0 = list(_PASS), list(_FAIL)
+    # ---- M5：注入「短路出口补两段式账」的改法（＝本件曾尝试、后回退的那一版）
+    #          ⇒ H2 必须判红（证明「现状口径」这条断言有判别力） ----
+    from . import writepipe
+    _oe = writepipe.WritePipeline.execute
+
+    def _me(self, cg, a):
+        out = _oe(self, cg, a)
+        if isinstance(out, dict) and out.get('committed') is False:
+            _t = twophase.begin(cg, out.get('id') or '', a.get('content', ''),
+                                actor='mut5:halt')
+            twophase.commit(cg, _t, status=twophase.STATUS_ABORTED,
+                            reason='halted_by=mut5')
+        return out
+
+    writepipe.WritePipeline.execute = _me
+    del _PASS[:]
+    del _FAIL[:]
+    try:
+        g_142_halt_2pc()
+    except Exception as exc:                       # noqa: BLE001
+        ok(False, '变异段抛异常：%s: %s' % (type(exc).__name__, exc))
+    red2 = [m for m in _FAIL if m.startswith('H2')]
+    writepipe.WritePipeline.execute = _oe
+    good2 = len(red2) >= 1
+    bad += 0 if good2 else 1
+    print('  %s M5 注入「短路补记账」改法 ⇒ H2 判红 %d 条%s'
+          % ('PASS' if good2 else 'FAIL', len(red2),
+             ('：' + '; '.join(red2[:2])) if red2 else ''))
+    # ---- M6：超限出口还原修前（缺 id/committed）⇒ H1 必须判红 ----
+    _142_MUT['oversize_keys'] = True
+    del _PASS[:]
+    del _FAIL[:]
+    try:
+        g_142_oversize_trio()
+    except Exception as exc:                       # noqa: BLE001
+        ok(False, '变异段抛异常：%s: %s' % (type(exc).__name__, exc))
+    red1 = [m for m in _FAIL if m.startswith('H1')]
+    _142_MUT['oversize_keys'] = False
+    good1 = len(red1) >= 2
+    bad += 0 if good1 else 1
+    print('  %s M6 超限出口缺 id/committed（还原修前）⇒ H1 判红 %d 条%s'
+          % ('PASS' if good1 else 'FAIL', len(red1),
+             ('：' + '; '.join(red1[:3])) if red1 else ''))
+    del _PASS[:]
+    del _FAIL[:]
+    _PASS.extend(_p0)
+    _FAIL.extend(_f0)
+    print('')
+    return bad
+
 def _run_mutations():
     print('!! 定点变异自证：给 G5b 判据体喂合成源码，判别力必须成立')
     bad = 0
@@ -725,6 +882,7 @@ def _run_mutations():
         if not good:
             print('        预期有红=%s 实际=%s' % (expect_red, got))
     print('')
+    bad += _run_142_mutations()
     return bad
 
 
