@@ -31,6 +31,7 @@ hive/src/json.rs:118-121 的实测口径：debug 主线程 768 层可过、1024 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,7 +67,38 @@ def _default_exe() -> str:
 
 
 EXE = _default_exe()
+_RT_DIR = os.path.join(_REPO, "swarm", "rust_runtime")
 _TMP_ROOT = tempfile.gettempdir()
+
+
+def _ensure_exe() -> bool:
+    """确保 protocol_vm 可执行文件在场；返回是否可用。
+
+    **为什么在守卫里自建**：`swarm/rust_runtime/target/` 是 gitignored 的构建产物，
+    裸 clone / CI runner 上不存在。本仓对 swarm 侧守卫的既有口径就是**自建**
+    （`swarm/tests/test_rust_swarm.py` 的「独立形态蜂群」段：`cwd=rt_dir` 跑
+    `cargo build --release --no-default-features`，并以 `shutil.which("cargo")` 为前置）。
+    本守卫首版只查在场、不自建 ⇒ Linux CI 上 H0 直接 FAIL 且 `probe()` 抛
+    `FileNotFoundError` ⇒ 整件 rc=1（**「未构建」被误报成代码失败**——正是
+    `.github/workflows/python-tests.yml` 的注释明令要避免的形态）。
+    这里同样以 cargo 在场为前置：**cargo 不在 ⇒ 行为面 SKIP（显式计数）+ 源断言面 [C] 照判**，
+    不把「没测到」记成绿，也不把「没构建」记成红。
+    """
+    if os.path.isfile(EXE):
+        return True
+    if not shutil.which("cargo") or not os.path.isdir(_RT_DIR):
+        return False
+    try:
+        p = subprocess.run(["cargo", "build", "--release", "--no-default-features"],
+                           cwd=_RT_DIR, capture_output=True, text=True, timeout=600,
+                           encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as e:
+        print("  [SKIP] 自建 protocol_vm 失败：" + type(e).__name__ + ": " + str(e))
+        return False
+    if p.returncode != 0:
+        print("  [SKIP] 自建 protocol_vm 非零退出：" + (p.stderr or "")[-200:])
+        return False
+    return os.path.isfile(EXE)
 
 
 def run(argv, timeout=120):
@@ -102,8 +134,31 @@ def tail_of(out: str) -> str:
 
 
 print("### 守卫对象 = " + EXE)
-check("H0 protocol_vm 可执行文件在场", os.path.isfile(EXE),
-      "缺 " + EXE + "（先 cargo build --release --manifest-path swarm/rust_runtime/Cargo.toml）")
+_HAS_EXE = _ensure_exe()
+# ★修前形态：此处 `check("H0 …", _HAS_EXE, …)` 会在二进制缺席时**先记一个 FAIL**，
+# 而下方 skip 分支随后才打印 SKIP 并 `sys.exit(0 if FAIL == 0 else 1)` ⇒
+# **先红后 SKIP**：CI（无 cargo/无二进制）上整件必红。
+# 判据目标不变（行为面确需二进制才可判），改的是「缺席时不该算作判据失败」——
+# 对齐本仓「裸 clone 不假红」口径与 `hive/test_issue155_156_rust.py` 同款。
+if _HAS_EXE:
+    check("H0 protocol_vm 可执行文件在场", True, EXE)
+
+if not _HAS_EXE:
+    # 行为面 SKIP（显式打印），源断言面 [C] 照判——与 hive/test_issue155_156_rust.py 同款：
+    # 「依赖二进制的行为面」与「纯源码可判的面」分开计，不因前者缺席而整件红/绿。
+    print("[A][A/B] 行为面 SKIP：缺 protocol_vm 且无法自建（无 cargo / 构建失败）")
+    print("[C] 源断言：两处解析器都带 MAX_DEPTH（防只修一处）")
+    for rel in ("swarm.rs", "serve.rs"):
+        try:
+            with open(os.path.join(_SRC, rel), encoding="utf-8") as f:
+                src = f.read()
+            check("C·" + rel + " 有 MAX_DEPTH 常量 + 深度检查",
+                  "MAX_DEPTH" in src and "depth" in src and "嵌套过深" in src,
+                  rel + " 缺深度上限")
+        except OSError as e:
+            check("C·" + rel + " 可读", False, type(e).__name__ + ": " + str(e))
+    print("\n结果: " + str(PASS) + " pass / " + str(FAIL) + " fail（行为面 SKIP）")
+    sys.exit(0 if FAIL == 0 else 1)
 
 print("[A] 行为面：深嵌套必须**干净拒绝**，不得栈溢出 abort")
 rc300, out300 = probe(300, extra="secret")

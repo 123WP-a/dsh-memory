@@ -47,7 +47,13 @@ _SILENT = False
 _VIOL = []
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_EXE = os.path.join(_REPO, "rust", "target", "release", "mdcg-eval.exe")
+#: Rust 对拍二进制路径。**后缀按平台取**——`mdcg-eval` 在 unix 上无 `.exe`（cargo 只在
+#: Windows 追加后缀）。本守卫首版硬编码 `mdcg-eval.exe`，于是 Linux CI 上 B0 恒报
+#: 「二进制缺失」⇒ 整件 rc=1，跨侧面 [B] 组一条都跑不到。平台差不是被测缺陷，是**量具
+#: 缺陷**（本仓既有口径：`scripts/rank_parity.py` / `md_cg/test_unify_default_off.py`
+#: 同款按 `os.name` 取后缀）。
+_EXE = os.path.join(_REPO, "rust", "target", "release",
+                    "mdcg-eval.exe" if os.name == "nt" else "mdcg-eval")
 _Q = "蜂群调度器 workers 领取任务"
 _BODY = ("# 功能名：比对样本" + chr(10) + "# 正文：蜂群调度器按 workers 上限领取任务。")
 
@@ -197,7 +203,9 @@ def _cross_face():
     """[B] 跨侧面：含空 tag vs 不含空 tag，两侧都必须不翻转且逐位一致。"""
     if not os.path.isfile(_EXE):
         check("B0 Rust 二进制在位（缺失即 fail-closed）", False,
-              "缺 %s —— 请先 cargo build --release（在 <仓根>/rust 内）" % _EXE)
+              "缺 %s —— 请先 `cargo build --release --manifest-path rust/Cargo.toml`"
+              "（在 <仓根> 内；CI 的 python-tests 已有该步，见 .github/workflows/"
+              "python-tests.yml）" % _EXE)
         return
     ta, ga = _mk(["", "标签A"])
     tb, gb = _mk(["标签A"])
