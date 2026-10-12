@@ -29,7 +29,7 @@
   漂移 / 悬空**只由节点自身 frontmatter ref 判**（`probe_ref` / `read_ref` 的唯一实现）；
   水位（`_refindex.json`）**不进 probe**——它只判「这个节点能不能跳过、不读源」。
   跳过的充分条件是三条同时成立：①节点 ref 与水位条目
-  `(hash, lineno, end, path, root)` **五项全等**；②源文件 size/mtime 未变；
+  `(hash, lineno, end, path, root)` **五项全等**；②源文件 size/mtime/sha256 三者全等未变；
   ③该 node_id 本轮尚未判过（跨大域撞 id 时同一 id 会被多条水位条目列出，只判一次）。
   五项里含 `path` / `root` 是必要的：不含时跨域撞 id 在稳态不可见（节点 ref 指向另一域
   而水位条目取自本域），且不一致会重复报红（同一 node_id 两条 stale）。
@@ -581,7 +581,7 @@ def read_ref(ref: dict, *, root: str = None, ref_kind: str = "ref") -> dict:
     }
 
 
-# 生效条件：n 为水位条目内的节点记录（id/lineno/end/hash）、e 为文件条目、rel/src_root 为源相对路径与源大域、unchanged 为源 size/mtime 未变时，按 cg.get(nid) 的 frontmatter ref 判该 node_id 的快路径结论并返回 {'node_id','kind','covered','probe','mismatch'}——取不回节点或节点无 ref 时 covered=False/probe=None（落回退路径、不记 mismatch）；五项全等且 unchanged 时 probe=None（跳过不读源）；否则 probe 为待探测 ref；不一致时 mismatch 带两侧 root/hash 与 kind_of_gap。
+# 生效条件：n 为水位条目内的节点记录（id/lineno/end/hash）、e 为文件条目、rel/src_root 为源相对路径与源大域、unchanged 为源 (size, mtime, sha256) 三者全等未变时，按 cg.get(nid) 的 frontmatter ref 判该 node_id 的快路径结论并返回 {'node_id','kind','covered','probe','mismatch'}——取不回节点或节点无 ref 时 covered=False/probe=None（落回退路径、不记 mismatch）；五项全等且 unchanged 时 probe=None（跳过不读源）；否则 probe 为待探测 ref；不一致时 mismatch 带两侧 root/hash 与 kind_of_gap。
 def _fast_path_verdict(cg, n: dict, e: dict, rel: str, src_root: str,
                        unchanged: bool) -> dict:
     """单条水位记录 → 该 node_id 的快路径结论（**唯一实现**，也是定点变异锚点）。
@@ -629,7 +629,7 @@ def _fast_path_verdict(cg, n: dict, e: dict, rel: str, src_root: str,
     return out
 
 
-# 生效条件：cg 的 index['nodes'] 非空时汇总 stale/dangling/unresolved/errors/ledger_mismatch 并返回 ok =（无 stale 且无 dangling）；only_tagged 为真时只探测 tags 含 'code'/'doc' 的节点，ledger 非空时先经 _fast_path_verdict 走 (size, mtime) 快路径。
+# 生效条件：cg 的 index['nodes'] 非空时汇总 stale/dangling/unresolved/errors/ledger_mismatch 并返回 ok =（无 stale 且无 dangling）；only_tagged 为真时只探测 tags 含 'code'/'doc' 的节点，ledger 非空时先经 _fast_path_verdict 走 (size, mtime, sha256) 快路径。
 def check_refs(cg, *, ledger: "Ledger" = None, max_nodes: int = MAX_CHECK,
                only_tagged: bool = True) -> dict:
     """漂移 / 悬空巡检（只读、不抛）。
@@ -637,7 +637,7 @@ def check_refs(cg, *, ledger: "Ledger" = None, max_nodes: int = MAX_CHECK,
     **分工：节点判漂移，水位只判跳过。** 探测数据只取**节点自身 frontmatter ref**
     （`ref_of(cg.get(nid))`）——ledger 条目一律不进 probe；它只用来判「这个节点能不能
     跳过、不读源」。跳过的充分条件（三条同时成立）：①节点 ref 与水位条目
-    `(hash, lineno, end, path, root)` **五项全等**；②源文件 size/mtime 未变；
+    `(hash, lineno, end, path, root)` **五项全等**；②源文件 size/mtime/sha256 三者全等未变；
     ③该 node_id 本轮尚未判过（去重）。五项含 `path` / `root` 是必要的：不含时跨域
     撞 id 在稳态不可见，且 node/水位不一致会重复报红。
     不一致本身不改判定（不进 `ok`、不产生新红行），只记 `ledger_mismatch` 归因行
@@ -685,6 +685,7 @@ def check_refs(cg, *, ledger: "Ledger" = None, max_nodes: int = MAX_CHECK,
             try:
                 st = os.stat(key)
                 unchanged = (e.get("size") == st.st_size
+                             and ledger.is_fresh(rel, key)
                              and abs(float(e.get("mtime") or 0.0) - st.st_mtime) < 1e-6)
             except OSError:
                 unchanged = False
