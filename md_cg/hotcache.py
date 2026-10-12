@@ -54,7 +54,13 @@ _KEYED_EXTRA = ("include_work", "roles", "paths", "path_weights", "recall_only",
                 # 环境变量（MDCG_SEMANTIC/MDCG_EN_ATOMS/MDCG_UNIFY_QUERY…），它们
                 # 同样改变候选资格与打分。v14 只补了参数面，故另立一键
                 # （2026-09-24 修复：同 query 下切开关会命中另一口径的缓存 → 静默错答）。
-                "env_switch", "bm25_access")
+                "env_switch", "bm25_access",
+                # #153（2026-10-12 DSH 端）：**索引代际**。写路径每次索引突变推进
+                # 代际（MdCGOS._on_index_mutation）⇒ 键随代际变化 ⇒ 旧代命中自然
+                # 失配，无需全清（全清会毁命中率，与 #154 性能面冲突）。
+                # 登记纪律同 env_switch：新增一个就登记一个——不登记等于让下一个人
+                # 看不出它承重（键用整份 extra，故漏登只影响可读性、不影响正确性）。
+                "index_gen")
 #: 不可稳定规范化的参数（自定义可调用）：非默认即**绕行缓存**（fail-closed）。
 _BYPASS_EXTRA = ("query_expand",)
 #: 影响检索结果的进程级开关（新增一个就登记一个——同 _KEYED_EXTRA 的纪律）。
@@ -130,7 +136,11 @@ class HotCache:
         if isinstance(v, (set, frozenset)):
             return tuple(sorted((HotCache._canon(x) for x in v), key=repr))
         if isinstance(v, dict):
-            return tuple(sorted((str(k), HotCache._canon(x))
+            # #153（2026-10-12 DSH 端）：键片段用**三元组**（"dict", 键, 值）。
+            # 修前是二元组 (键, 值)，与下面的 list/tuple/set 分支同形 ⇒
+            # `{"a": 1}` 与 `[("a", 1)]` 的 canon **逐位相同**，两个语义不同的入参
+            # 撞同一个 query 缓存键 ⇒ 静默串结果（缓存正确性缺陷，非优化项）。
+            return tuple(sorted(("dict", str(k), HotCache._canon(x))
                                 for k, x in v.items()))
         # 其余（含自定义对象/可调用）：repr 含内存地址 → 每次不同 →
         # 缓存永不命中（等价绕行），是**安全侧**失败（不串味）。

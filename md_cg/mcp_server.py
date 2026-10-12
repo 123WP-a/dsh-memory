@@ -4729,7 +4729,14 @@ def main():
         if not line:
             continue
         try:
-            msg = json.loads(line)
+            # #151（2026-10-12 DSH 端）：**拒 NaN / Infinity 字面量**。
+            # Python 的 json.loads 默认接受 `NaN`/`Infinity`/`-Infinity`（非标准 JSON
+            # 扩展），解析出的 float 会一路带进写入面（importance/confidence 等）成为
+            # 非有限值。用 parse_constant 直接抛 ValueError ⇒ 走下方既有的 -32700
+            # Parse error 通道（客户端拿到明确信号，不再是「看起来合法」的请求）。
+            def _reject_const(s):
+                raise ValueError("非标准 JSON 字面量：%s（JSON-RPC 不接受 NaN/Infinity）" % s)
+            msg = json.loads(line, parse_constant=_reject_const)
         except ValueError as _pe:
             # issue #83.1：非法 JSON 按 JSON-RPC 2.0 回 -32700 Parse error。
             # 修前此处静默 continue —— 客户端只能等超时，且无任何信号；

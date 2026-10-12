@@ -253,10 +253,19 @@ pub mod serde_json_like {
         out
     }
 
+    /// 嵌套深度上限（#156⑧ · K 组 task-49）：递归下降 value↔object/array 互递归无界
+    /// 时，深嵌套输入会让 **Rust 栈溢出 abort 整进程**——栈溢出不可捕获，swarm/serve
+    /// 一并死。而本解析器的输入面（inbox 行 / 事件行 / --config 配置）都是任意宿主可写
+    /// 的跨语言文件协议接口，不能假定良构。
+    /// 取 256 与 hive 侧**同族解析器的既有口径逐位一致**（hive/src/json.rs:123 的 N184
+    /// 判据：debug 主线程 768 层可过、1024 层即溢出 ≈1KB/层，故对上界留 ≥3× 余量；
+    /// 正常文件嵌套 ≤10 层）。两侧同值不是巧合——同族解析器一个上限，勿分叉两套。
+    const MAX_DEPTH: usize = 256;
+
     pub fn parse(s: &str) -> Result<Value, String> {
         let b: Vec<char> = s.chars().collect();
         let mut i = 0usize;
-        let v = pv(&b, &mut i)?;
+        let v = pv(&b, &mut i, 0)?;
         Ok(v)
     }
 
@@ -266,7 +275,13 @@ pub mod serde_json_like {
         }
     }
 
-    fn pv(b: &[char], i: &mut usize) -> Result<Value, String> {
+    fn pv(b: &[char], i: &mut usize, depth: usize) -> Result<Value, String> {
+        // #156⑧：深度闸在**每次进入递归体**时判——超限返回 Err（可读原因）落「解析
+        // 失败」面，绝不放任递归把栈吃穿。旧版无此闸，实测 5000 层直接
+        // `thread 'main' has overflowed its stack` abort（退出码 0xC00000FD）。
+        if depth > MAX_DEPTH {
+            return Err(format!("嵌套过深（>{MAX_DEPTH} 层）——拒绝解析以防栈溢出"));
+        }
         skip_ws(b, i);
         match b.get(*i) {
             Some('{') => {
@@ -290,7 +305,7 @@ pub mod serde_json_like {
                                 return Err("缺 ':'".into());
                             }
                             *i += 1;
-                            let v = pv(b, i)?;
+                            let v = pv(b, i, depth + 1)?;
                             m.insert(k, v);
                         }
                         _ => return Err("对象非法".into()),
@@ -310,7 +325,7 @@ pub mod serde_json_like {
                         Some(',') => {
                             *i += 1;
                         }
-                        _ => items.push(pv(b, i)?),
+                        _ => items.push(pv(b, i, depth + 1)?),
                     }
                 }
             }
@@ -2112,5 +2127,20 @@ mod escape_parity_tests {
             .and_then(|p| p.get("文本"))
             .and_then(|t| t.as_str());
         assert_eq!(got, Some("甲\u{9}乙\r丙"));
+    }
+
+    /// #156⑧ 守卫（K 组 · task-49）：本解析器（swarm 配置 / 收件箱行 / 事件行读侧）
+    /// 是递归下降，**必须有嵌套深度上限**——深嵌套输入必须得到 Err，绝不放任递归把
+    /// 栈吃穿（Rust 栈溢出不可捕获，实测 5000 层直接 overflowed its stack 且退出码
+    /// 0xC00000FD，整进程死）。纯行为断言：只看「深→Err、浅→Ok」，不做源码文本匹配。
+    #[test]
+    fn deep_nesting_is_rejected_not_aborting() {
+        let deep = format!("{}{}{}", "{\"a\":".repeat(5000), "1", "}".repeat(5000));
+        match parse(&deep) {
+            Err(e) => assert!(e.contains("嵌套过深"), "拒绝原因须可读（点名嵌套过深）：{e}"),
+            Ok(_) => panic!("深嵌套未被拒绝（递归无上限 ⇒ 生产面栈溢出 abort）"),
+        }
+        let shallow = format!("{}{}{}", "{\"a\":".repeat(100), "1", "}".repeat(100));
+        assert!(parse(&shallow).is_ok(), "上限内结构被误拒（上限过紧）");
     }
 }

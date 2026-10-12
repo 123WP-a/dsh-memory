@@ -41,6 +41,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import time
@@ -48,6 +50,11 @@ import time
 from .fsutil import atomic_write
 
 SCHEMA = 2                # v2：水位以「源文件绝对路径」为键（v1 按 rel 会跨大域撞名）
+# #157（2026-10-12）：水位条目**加法式**新增 sha256 列（补 is_fresh 的「等长改写 +
+# mtime 还原」漏判）。刻意**不 bump 到 3**：加列是兼容扩展（旧读者忽略多余键），
+# 且 is_fresh 对「无 sha256 列的旧条目」一律判不新鲜 ⇒ 下一轮索引就地重切补列，
+# 属优雅迁移；bump 则连 nodes 区间一并丢弃、强制全量重建。若日后要显式版本闸，
+# 把本行改成 3 并在 load() 保持 schema 严格相等即可（口径即此处）。
 LEDGER_FILE = "_refindex.json"
 REF_KEYS = ("code_ref", "doc_ref")
 MAX_CHECK = 2000          # 巡检节点上限（超出报 truncated，不静默截断）
@@ -62,6 +69,25 @@ def _src_key(fp: str) -> str:
     `alpha.py` 这种同名文件上互相覆盖——水位被静默丢掉，巡检就漏报。
     """
     return os.path.abspath(fp or "")
+
+
+# 生效条件：fp 为可读文件路径时返回其**整文件字节**的 sha256 十六进制摘要（64 字符）；open/read 抛 OSError 时返回 None（读不到 ⇒ is_fresh 判不新鲜，宁可重切不漏判）；不缓存、不解析。
+def _sha256_file(fp: str):
+    """源文件整字节身份指纹（#157；口径与 mdcg._file_digest 同源——身份由字节定）。
+
+    为什么必须补：is_fresh 原只用 (size, mtime) —— 等长改写且 mtime 被还原
+    （cp -p / rsync -t / tar x / 备份还原 / 粗粒度 FS）时旧水位继续被判 fresh，
+    增量索引**静默跳过已改源**。同仓 mdcg._note_witness 已就同一类问题补过整文件
+    哈希，本处是对称补齐（同类实现不能一半有尺、一半没有）。
+
+    代价（如实标注）：恒读一遍文件。相对它避免的**重切/重解析**仍是净收益，但
+    「stat-only 的免费快路径」不复存在 —— 这是把正确性置于省 IO 之上的取舍。
+    """
+    try:
+        with io.open(fp, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
 
 
 # 生效条件：无 required 形参，任何调用都返回 round(time.time(), 1)，把时间戳压到 1 位小数以稳定 `_refindex.json` 字节数。
@@ -153,7 +179,11 @@ def ref_of(node) -> tuple:
 
 # 生效条件：以 root 为必填实参构造，实例化即置 self.root=root、self.path=os.path.join(root, LEDGER_FILE)、self._d=None；
 class Ledger:
-    """`<root>/_refindex.json`：每个源文件的 (size, mtime) 水位 + 节点区间。"""
+    """`<root>/_refindex.json`：每个源文件的 (size, mtime, sha256) 水位 + 节点区间。
+
+    sha256 列（#157）是 is_fresh 的**第二判据**：size/mtime 双等后再比整文件哈希，
+    堵住「等长改写 + mtime 被还原」沿用旧水位静默跳过已改源的漏判。
+    """
 
 # 生效条件：当传入 root 时，self.root 取该 root，self.path 为 os.path.join(root, LEDGER_FILE)，self._d 置为 None；
     def __init__(self, root: str):
@@ -177,9 +207,18 @@ class Ledger:
         self._d = d or {"schema": SCHEMA, "updated_at": 0.0, "files": {}}
         return self._d
 
-# 生效条件：传入 rel、fp 时，若 self.load()["files"].get(_src_key(fp)) 缺失或为假值、或 os.stat(fp) 抛 OSError、或条目 e.get("size") != st.st_size，则返回 False；否则返回 abs(float(e.get("mtime") or 0.0) - st.st_mtime) < 1e-6（mtime 缺失或假值时按 0.0）；
+# 生效条件：传入 rel、fp 时，若 self.load()["files"].get(_src_key(fp)) 缺失或为假值、或 os.stat(fp) 抛 OSError、或条目 e.get("size") != st.st_size、或 abs(float(e.get("mtime") or 0.0) - st.st_mtime) >= 1e-6、或条目无 sha256 列（旧版水位）、或 _sha256_file(fp) 与条目 sha256 不等（含读不到即 None），则返回 False；三者全等才返回 True（可跳过不重切）。
     def is_fresh(self, rel: str, fp: str) -> bool:
-        """源文件自上次索引后未变（size + mtime 双等）→ 可跳过不重切。"""
+        """源文件自上次索引后未变 → 可跳过不重切。
+
+        #157：判据是 (size, mtime, sha256) **三者全等**。size/mtime 双等在
+        「等长改写 + mtime 被还原」（cp -p / rsync -t / tar x / 备份还原 /
+        粗粒度 FS）下会漏判——旧水位据此继续判 fresh，增量索引**静默跳过已改源**。
+        故与 mdcg._note_witness 同款，以**字节**收口身份。
+
+        旧条目（无 sha256 列）一律 False ⇒ 下一轮索引就地重切补列（优雅迁移；
+        刻意不 bump SCHEMA，口径见模块常量处注释）。
+        """
         e = self.load()["files"].get(_src_key(fp))
         if not e:
             return False
@@ -189,9 +228,14 @@ class Ledger:
             return False
         if e.get("size") != st.st_size:
             return False
-        return abs(float(e.get("mtime") or 0.0) - st.st_mtime) < 1e-6
+        if abs(float(e.get("mtime") or 0.0) - st.st_mtime) >= 1e-6:
+            return False
+        want = e.get("sha256")
+        if not want:
+            return False                # 旧版水位无哈希列 ⇒ 判不新鲜、重切补列
+        return _sha256_file(fp) == want
 
-# 生效条件：当 rel、fp、kind、nodes 传入且 os.stat(fp) 成功时，向 self.load()["files"][_src_key(fp)] 写条目，其中 root 为 root if root else os.path.dirname(key)、path 为 rel、kind 为 kind、size/mtime 取 st、nodes 为每项 n.get("id")/n.get("lineno")/n.get("end")/n.get("hash")；os.stat(fp) 抛 OSError 时不写入；
+# 生效条件：当 rel、fp、kind、nodes 传入且 os.stat(fp) 成功时，向 self.load()["files"][_src_key(fp)] 写条目，其中 root 为 root if root else os.path.dirname(key)、path 为 rel、kind 为 kind、size/mtime 取 st、sha256 取 _sha256_file(fp)（读不到记 None）、nodes 为每项 n.get("id")/n.get("lineno")/n.get("end")/n.get("hash")；os.stat(fp) 抛 OSError 时不写入；
     def record(self, rel: str, fp: str, kind: str, nodes,
                root: str = None) -> None:
         """记一个源文件的水位（节点区间用于判 stale）。
@@ -209,6 +253,7 @@ class Ledger:
             "path": rel,
             "size": st.st_size,
             "mtime": st.st_mtime,
+            "sha256": _sha256_file(fp),     # #157：is_fresh 的第二判据（读不到记 None）
             "kind": kind,
             "nodes": [
                 {"id": n.get("id"), "lineno": n.get("lineno"),

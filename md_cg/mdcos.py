@@ -841,9 +841,57 @@ class MdCGOS(MdCG):
     # ================= 2. role 分层索引 =================
 
 # 生效条件：当 node_id 与 content 传入时，先若有 role 非 None 则放入 kw，调用父类 add 得 nid；仅当索引中 e 非 None 且 role 非 None 时把 role 写入索引并标记 dirty；随后记 audit（session 取与写面同一**有效会话**＝kw["session"]——显式声明优先、否则三态单点；sens 同 kw.get("sensitivity")）并返回 nid；
+    # ---- #153（2026-10-12 DSH 端）：索引代际 + 通用失效单点（写路径热点，**禁全清**）----
+    # 口径取证（不猜）：`mdcos.py:1746-1748` 的 P1b-2 注释自己写明——「旧索引代里
+    # 缓存的命中结果对新写入不可见（**静默错答**）」，其现有对策只在**读面**
+    # （`_maybe_reload_index()` 在查询前 + 重载时失效 hotcache/readcache），而
+    # **写路径从不推进/失效查询缓存** ⇒ 同进程「写后读」会命中旧代结果。
+    # 故这是**正确性缺陷**（缓存键未覆盖索引代际），不是密钥面问题。
+    def _index_generation(self) -> int:
+        """当前索引代际（惰性初始化，免改父类 __init__）。"""
+        g = getattr(self, "_index_gen", None)
+        if g is None:
+            g = self._index_gen = 0
+        return g
+
+    # 生效条件：索引突变后由 _set_index_entry 委派调用；代际 +1（O(1)）并对**该节点**做节点级失效；**不触碰 query 缓存**（全清会毁命中率，与 #154 性能面冲突）；异常一律吞掉，不得冒泡进写路径。
+    def _on_index_mutation(self, node_id=None):
+        """#153 通用失效单点（**索引突变**语义；与 #152 的密钥面单点分开）。"""
+        self._index_gen = self._index_generation() + 1
+        try:
+            from . import hotcache as _hc
+            hc = _hc.get(self)
+            if hc is not None and node_id:
+                hc.invalidate_node(node_id)   # 节点级 O(1)，非 invalidate_node_and_queries
+        except Exception:                                  # noqa: BLE001
+            pass
+        return self._index_gen
+
+    # 生效条件：node_id 与 entry 给定；转调父类 _set_index_entry 后调用 _on_index_mutation——所有 `_stage` 调用点经 `self._set_index_entry` 汇流（mdcg.py:3223-3225），故本覆盖即覆盖**全部索引突变入口**，无需在 mdcg.py 另写第二份口径；
+    def _set_index_entry(self, node_id, entry):
+        super()._set_index_entry(node_id, entry)
+        self._on_index_mutation(node_id)
+
     def add(self, node_id: str, content: str, layer: str = "knowledge",
             role: str = None, **kw) -> str:
         """在父类 add 之上：写入 role（frontmatter + 索引），默认 role=None（知识）。"""
+        # #151（2026-10-12 DSH 端）：**有限性与取值范围守卫**（范式抄 `reach._ttl()`：
+        # 非法值**回落文档缺省**，不抛、不改既有调用方语义）。
+        # 病象：`importance`/`confidence` 直接落 frontmatter，而 JSON/上游可传入
+        # `NaN`/`±Infinity`（Python `json.loads` 默认接受这三个非标准字面量）——
+        # 一旦落盘，排序、权重相乘、衰减都会被污染成 NaN 并被静默持久化
+        # （NaN 参与比较恒 False ⇒ 排序静默失序，且事后无法从读数区分）。
+        # 注：报告里「-inf 节点永不入选」一条已被核验员驳倒（仍返回），**本件不做**。
+        for _k, _dflt in (("importance", 0.5), ("confidence", 0.6)):
+            _v = kw.get(_k)
+            if _v is None:
+                continue
+            try:
+                _f = float(_v)
+            except (TypeError, ValueError):
+                _f = None
+            if _f is None or not math.isfinite(_f) or not (0.0 <= _f <= 1.0):
+                kw[_k] = _dflt
         if role is not None:
             kw["role"] = role
         # 会话归属必须落 frontmatter：本文件 session 过滤的文档即写「frontmatter.session，
@@ -1751,6 +1799,9 @@ class MdCGOS(MdCG):
             # 进程级开关也改口径（v14 只补了参数面）：MDCG_SEMANTIC /
             # MDCG_EN_ATOMS / MDCG_UNIFY_QUERY 等不入键即跨口径命中（2026-09-24 修复）。
             "env_switch": _hc.env_switch_key(),
+            # #153：**索引代际进键**——写路径推进代际 ⇒ 旧代缓存命中自然失配
+            # （无需全清；命中率只在代际变化时受影响，其余查询照常命中）。
+            "index_gen": self._index_generation(),
         }
         if "bm25" in paths:
             from . import bm25
@@ -5179,16 +5230,40 @@ class MdCGSecure(MdCGOS):
 
 # 生效条件：调用 self._init_crypto(master_key)；master_key 为 None 时回落环境变量与主密钥文件，密钥缺失或长度非 32 字节抛 crypto.CryptoError；成功后返回 crypto_status()；
     def unlock(self, master_key=None):
-        """运行时解锁（显式密钥 / 重新加载环境变量或主密钥文件）。"""
+        """运行时解锁（显式密钥 / 重新加载环境变量或主密钥文件）。
+
+        #152（2026-10-12 DSH 端，缓存面并入本件以免与他组同文件互踩）：解锁是
+        **密钥面突变**——读缓存（readcache）与查询热缓存（hotcache）里可能留着
+        上一密钥态生成的读数 ⇒ 一并失效，避免跨密钥态串结果。
+        """
         self._init_crypto(master_key)
+        self._invalidate_caches_on_key_change()
         return self.crypto_status()
 
 # 生效条件：无前置；丢弃内存中的 self.kek / self.dek 并置 _crypto_error="locked"（已落盘密文不受影响）；返回 crypto_status()；
     def lock(self):
-        """锁定：丢弃内存中的密钥（已落盘密文不受影响）。"""
+        """锁定：丢弃内存中的密钥（已落盘密文不受影响）。
+
+        #152（同上）：锁定同样改密钥面 ⇒ 清 readcache + 失效 hotcache。
+        """
         self.kek = self.dek = None
         self._crypto_error = "locked"
+        self._invalidate_caches_on_key_change()
         return self.crypto_status()
+
+# 生效条件：无条件尝试清 readcache 并失效 hotcache；任一模块不可用/抛异常时静默跳过（缓存面清理不得阻断锁/解锁这一主路径）；
+    def _invalidate_caches_on_key_change(self):
+        """密钥面突变后清缓存（#152）。失败不阻断锁/解锁。"""
+        try:
+            from . import readcache as _rc
+            _rc.clear(self)
+        except Exception:                                      # noqa: BLE001
+            pass
+        try:
+            from . import hotcache as _hc
+            _hc.invalidate(self)
+        except Exception:                                      # noqa: BLE001
+            pass
 
 # 生效条件：调用 crypto_status 时，返回当前加密状态字典；unlocked 取决于 self.dek is not None，kek_fp 在 self.kek 为假值时取 None，否则取 crypto.kek_fingerprint(self.kek)；read_foreign_seen 取进程内跨身份失败解密计数（缺陷二：计数恒完整、与采样开关无关，可被体检面读到）。
     def crypto_status(self):

@@ -207,14 +207,59 @@ def load_cached(root: str) -> dict:
     return t
 
 
+# 生效条件：无条件惰性导入 crypto 并返回其 ENCRYPTED_LEVELS 的小写集合；crypto 不可用/无该常量时返回空集（空集=不启用密封面判据，退回旧行为）。
+def _encrypted_levels() -> set:
+    try:
+        from . import crypto
+        return {str(x).strip().lower() for x in getattr(crypto, "ENCRYPTED_LEVELS", ())}
+    except Exception:
+        return set()
+
+
+# 生效条件：cg 同时具备 kek 与 dek 两个属性（即 MdCGSecure 一类挂了密钥面的实例）时返回 True，否则 False；
+# 鸭子类型判定——不 import mdcos，避免 postings ← mdcg ← mdcos 的循环导入。
+def _is_sealed_instance(cg) -> bool:
+    return hasattr(cg, "kek") and hasattr(cg, "dek")
+
+
+# 生效条件：nodes 为 dict 时返回其中 entry["sensitivity"] 属加密级的 id 列表（只读索引元数据，不解密、不读正文）；
+# nodes 为假值、crypto 不可用或加密级集合为空时返回 []。
+def _sealed_node_ids(nodes) -> list:
+    lv = _encrypted_levels()
+    if not lv or not nodes:
+        return []
+    return [nid for nid, e in (nodes or {}).items()
+            if str(((e or {}).get("sensitivity")) or "").strip().lower() in lv]
+
+
 # 生效条件：cg 为假值或取不到 index["nodes"] 时返回 {"nodes":0,"terms":0,"postings":0,"rebuilt":False}；
+# **密封面 fail-closed（#152①）**：索引中存在加密级节点、或本实例挂密钥面且当前可解密（dek 为真）时，
+# 一律**不写任何文件**并返回 {"schema":…,"rebuilt":False,"refused":<原因>,"sealed_nodes":N,"reason":…}——
+# 密文节点的明文 bigram 不得落进 <root>/_postings.json；
 # 否则遍历 index 逐节点取 content+tags 的 bigram、按 id 去重累积，先写数据表、再取快照指纹并写元数据，
 # 返回含 nodes/terms/postings/rebuild=True/snapshot 的 stats。limit 为真值时最多处理 limit 个节点。
 def build(cg, limit: int = None) -> dict:
-    """全量重建发布表（幂等、不改节点内容）。"""
+    """全量重建发布表（幂等、不改节点内容）。
+
+    #152①（2026-10-12）：**密文库拒绝构建（fail-closed）**。本函数经 `cg.get()` 取到的
+    是**解密后**的 content，其明文 bigram 一旦写进 `<root>/_postings.json` 就不再随
+    `lock()` 收回——节点正文加密而词项索引不加密，等于把主题词表留在盘上。
+    故：只要待索引面里存在加密级节点（或本实例正持密钥可解密），**不写任何文件**直接拒绝；
+    调用方据返回值的 `refused` 字段判因（`sealed_nodes` / `sealed_instance_unlocked`）。
+    """
     nodes = (getattr(cg, "index", {}) or {}).get("nodes") or {}
     if not nodes:
         return {"nodes": 0, "terms": 0, "postings": 0, "rebuilt": False}
+    sealed_ids = _sealed_node_ids(nodes)
+    if sealed_ids:
+        return {"schema": SCHEMA, "nodes": 0, "terms": 0, "postings": 0,
+                "rebuilt": False, "refused": "sealed_nodes",
+                "sealed_nodes": len(sealed_ids),
+                "reason": "密封面 fail-closed（#152①）：密文节点的明文 bigram 不得落进 _postings.json"}
+    if _is_sealed_instance(cg) and getattr(cg, "dek", None):
+        return {"schema": SCHEMA, "nodes": 0, "terms": 0, "postings": 0,
+                "rebuilt": False, "refused": "sealed_instance_unlocked", "sealed_nodes": 0,
+                "reason": "密封面 fail-closed（#152①）：实例持密钥可解密，明文 bigram 不得落进 _postings.json"}
     table = {}
     n = 0
     for nid, e in list(nodes.items()):

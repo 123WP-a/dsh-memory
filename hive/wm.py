@@ -143,7 +143,10 @@ def cmd_snapshot(job: str, wm: str, artifacts: str | None = None,
             return {"ok": False, "conflict": "status_unreadable",
                     "error": f"记账面不可读: status.json 解析失败（{e}）——"
                              f"事故信号不静默，须人工裁决后方可快照"}
-        if status.get("state") == "error":
+        # issue #156⑤：**失败类终态闸**——error / timeout / killed 任一终态与
+        # result.ok=true 并存即矛盾（serve 中断/被杀后孤儿执行器补写产物），人工
+        # 裁决前不放行。done 是正常成功终态，**不**入闸（否则正常快照全被拒）。
+        if str(status.get("state") or "") in ("error", "timeout", "killed"):
             return {
                 "ok": False,
                 "conflict": "late_result_after_error",

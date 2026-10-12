@@ -81,7 +81,7 @@ def build(index_obj):
     return ix
 
 
-# 生效条件：ix 为 StgIndex、nodes 为快照 nodes 映射时，逐项核对「三表恒为快照 keys 的划分」——pos 与快照键集双向相等、pos 序 == 快照物理序、by_session/by_layer 各桶两两不交且并集 == 键集、by_time ∪ nonfinite ∪ untimed 同上、by_time 升序且分类与条目实际 session/layer/时间逐条一致；返回不一致说明列表（空 = 不变量成立）。O(N)，守卫/审计用，不在取数热路径。
+# 生效条件：ix 为 StgIndex、nodes 为快照 nodes 映射时，逐项核对「三表恒为快照 keys 的划分」——pos 与快照键集双向相等、pos 序 == 快照物理序、by_session/by_layer 各桶两两不交且并集 == 键集、by_time ∪ nonfinite ∪ untimed 同上、by_time 升序且分类与条目实际 session/layer/时间逐条一致、**四个桶的下标表与桶列表互为逆映射（#157，swap-pop 的正确性判据）**；返回不一致说明列表（空 = 不变量成立）。O(N)，守卫/审计用，不在取数热路径。
 def verify(ix, nodes):
     """划分不变量自检：返回不一致说明列表（空 = 完好）。"""
     bad = []
@@ -106,6 +106,32 @@ def verify(ix, nodes):
         if set(seen) != ids:
             bad.append("%s 并集与快照键集不等（多 %d / 缺 %d）"
                        % (name, len(set(seen) - ids), len(ids - set(seen))))
+    # #157：下标表与桶列表必须**互为逆映射**——swap-pop 的正确性只由这条守住。
+    # 删错下标若只错在顺序上，集合级判据（上面那些）未必立刻察觉；这里逐位核。
+    for name, table, imaps in (("by_session", ix.by_session, ix.ix_session),
+                               ("by_layer", ix.by_layer, ix.ix_layer)):
+        if set(imaps) != set(table):
+            bad.append("%s 下标表的桶键与列表不同步（多 %d / 缺 %d）"
+                       % (name, len(set(imaps) - set(table)),
+                          len(set(table) - set(imaps))))
+        for bucket, lst in table.items():
+            imap = imaps.get(bucket)
+            if imap is None or len(imap) != len(lst):
+                bad.append("%s[%r] 下标表缺失或长度不符（%s != %d）"
+                           % (name, bucket,
+                              "None" if imap is None else len(imap), len(lst)))
+                continue
+            for i, x in enumerate(lst):
+                if imap.get(x) != i:
+                    bad.append("%s[%r] 下标表与列表不符（%s -> %r，期望 %d）"
+                               % (name, bucket, x, imap.get(x), i))
+                    break
+    for name, lst, imap in (("untimed", ix.untimed, ix.ix_untimed),
+                            ("nonfinite", ix.nonfinite, ix.ix_nonfinite)):
+        if len(imap) != len(lst):
+            bad.append("%s 下标表长度不符（%d != %d）" % (name, len(imap), len(lst)))
+        elif any(imap.get(x) != i for i, x in enumerate(lst)):
+            bad.append("%s 下标表与列表不符" % name)
     timed = [nid for _t, nid in ix.by_time]
     sess_sets = {k: set(v) for k, v in ix.by_session.items()}
     layer_sets = {k: set(v) for k, v in ix.by_layer.items()}
@@ -149,6 +175,11 @@ class StgIndex:
     """快照的结构倒排（三张表 + 物理位序 + 每节点分类记录）。
 
     维护纪律：增删只经 `add` / `remove`（写侧单点），取数只经 `subset`（读侧单点）。
+    #157：四个桶列表各配一张**下标表**（ix_session/ix_layer/ix_untimed/ix_nonfinite），
+    摘除走 swap-pop（O(1)）；桶内顺序因此不再保证是物理序，由 `subset` 出口统一
+    `_in_pos_order` 回排把契约保住。`by_time` 必须保持升序、不能换位，其 `del`
+    仍为 O(表长)——批量删 timed 节点仍是 O(N²)，属本件**未闭合余项**（见
+    `_unclassify` 内注释与守卫 G4 对照读数）。
     `cls[nid] = (sid, layer, bucket, t)` 是**增量摘除**的依据（不必回扫桶猜分类）；
     任一步异常 ⇒ `broken = True`（读侧据此回退全量并重建，绝不带着半张表取数）。
     """
@@ -162,6 +193,14 @@ class StgIndex:
         self.nonfinite = []
         self.pos = {}
         self.cls = {}
+        # #157：桶内**下标表**（与四个桶列表一一对应）——使 _unclassify 的摘除
+        # 从 list.remove 的 O(桶长) 降到 swap-pop 的 O(1)。代价：swap-pop 会打乱
+        # 桶内顺序（原先恰好是物理序），故 subset 出口统一按 pos 回排，把既有
+        # 「索引物理序」契约在读侧**单点**保住（见 subset 的出口注释）。
+        self.ix_session = {}        # sid   -> {nid: 桶内下标}
+        self.ix_layer = {}          # layer -> {nid: 桶内下标}
+        self.ix_untimed = {}        # nid   -> untimed 内下标
+        self.ix_nonfinite = {}      # nid   -> nonfinite 内下标
         self.broken = False
         self._next_pos = 0
 
@@ -189,44 +228,67 @@ class StgIndex:
         except Exception:                   # noqa: BLE001
             self.broken = True
 
+    # 生效条件：lst 为桶列表、imap 为「nid -> 桶内下标」表、nid 不在 lst 中；恒把 nid 追加到尾部并登记其下标（len-1），返回 None。
+    @staticmethod
+    def _push(lst, imap, nid):
+        lst.append(nid)
+        imap[nid] = len(lst) - 1
+
+    # 生效条件：lst 为桶列表、imap 为对应下标表、nid 必在 imap 中；以 swap-pop 摘除该 nid——nid 不在末位时把末位元素搬进空洞并改其下标，在末位时直接 pop；恒返回 None。（O(1)：只动一个元素 + 两次字典写。）
+    @staticmethod
+    def _swap_pop(lst, imap, nid):
+        i = imap.pop(nid)
+        last = lst[-1]
+        if last != nid:                 # 不在末位：末位搬进空洞、改其下标
+            lst[i] = last
+            imap[last] = i
+        lst.pop()
+
     def _classify(self, nid, entry):
         e = entry if isinstance(entry, dict) else {}
         sid, layer = _hashable(e.get("session")), _hashable(e.get("layer"))
         t = time_of(e)
-        self.by_session.setdefault(sid, []).append(nid)
-        self.by_layer.setdefault(layer, []).append(nid)
+        self._push(self.by_session.setdefault(sid, []),
+                   self.ix_session.setdefault(sid, {}), nid)
+        self._push(self.by_layer.setdefault(layer, []),
+                   self.ix_layer.setdefault(layer, {}), nid)
         if t is None:
             bucket = 2
-            self.untimed.append(nid)
+            self._push(self.untimed, self.ix_untimed, nid)
         elif math.isfinite(t):
             bucket = 0
             bisect.insort(self.by_time, (t, nid))
         else:
             bucket = 1                  # NaN/±inf：见模块 docstring「为什么单列」
-            self.nonfinite.append(nid)
+            self._push(self.nonfinite, self.ix_nonfinite, nid)
         self.cls[nid] = (sid, layer, bucket, t)
 
+    # 生效条件：nid 必在 cls 中；按分类把 nid 从其所在桶以 swap-pop（O(1)）摘除并同步下标表——桶空则连桶键一并删除；bucket==0 走 by_time 的二分定位 + del（升序表不可换位，仍为 O(表长) 的搬移，见下方余项注释）；任一步异常抛给上层置 broken；恒返回 None。
     def _unclassify(self, nid):
         sid, layer, bucket, t = self.cls.pop(nid)
-        lst = self.by_session[sid]
-        lst.remove(nid)
-        if not lst:                     # 空桶不保留（表规模读数如实）
+        self._swap_pop(self.by_session[sid], self.ix_session[sid], nid)
+        if not self.by_session[sid]:    # 空桶不保留（表规模读数如实）
             self.by_session.pop(sid, None)
-        lst = self.by_layer[layer]
-        lst.remove(nid)
-        if not lst:
+            self.ix_session.pop(sid, None)
+        self._swap_pop(self.by_layer[layer], self.ix_layer[layer], nid)
+        if not self.by_layer[layer]:
             self.by_layer.pop(layer, None)
+            self.ix_layer.pop(layer, None)
         if bucket == 0:
             # 二分定位而非全表连比：(t, nid) 在升序表内唯一，命中即该位；
-            # 不在该位 ⇒ 状态已不可信，抛错由上层置 broken（绝不摘错条目）
+            # 不在该位 ⇒ 状态已不可信，抛错由上层置 broken（绝不摘错条目）。
+            # 余项（#157 未闭合部分）：by_time 必须保持升序，不能 swap-pop，
+            # 故 del 仍是 O(表长) 的搬移——批量删 timed 节点仍为 O(N²)，
+            # 计数见守卫 G4 的前后对照；彻底解法是「升序表 + 惰性删除（墓碑 +
+            # 阈值压实）」，属读侧多点改动，留待裁定（本件范围见任务卡）。
             i = bisect.bisect_left(self.by_time, (t, nid))
             if i >= len(self.by_time) or self.by_time[i] != (t, nid):
                 raise KeyError(nid)
             del self.by_time[i]
         elif bucket == 1:
-            self.nonfinite.remove(nid)
+            self._swap_pop(self.nonfinite, self.ix_nonfinite, nid)
         else:
-            self.untimed.remove(nid)
+            self._swap_pop(self.untimed, self.ix_untimed, nid)
 
     # 生效条件：lo <= hi 时返回 t ∈ [lo, hi] 的 id 列表（**时间序**，调用方按 pos 回排）；lo > hi 返回空列表（区间为空——调用方在 inverted 查询上先回退，见 stg 侧）。
     def range_ids(self, lo, hi):
@@ -241,6 +303,10 @@ class StgIndex:
         return [nid for _t, nid in self.by_time[a:b]]
 
     # 生效条件：session/layer 为 MISSING 表示该维不参与（**注意 None 是合法维值**，不表示缺省），time_range 为 None 表示时间维不参与、否则为 (lo, hi)；无任何参与维时返回 (None, ())；否则返回 (候选 id 列表（**索引物理序**）, 实际服务的维名元组)——任一维在表中无键即得空列表（与基线等值比较同语义，非回退）。
+    # 生效条件：ids 为可迭代 nid（每个 nid 均应在 self.pos 中，否则 KeyError 抛给上层置 broken）；返回按**物理位序**（pos）升序的**新列表**。为什么出口统一回排（#157）：桶表改为 swap-pop 后不再是物理序，而 subset 的对外契约仍是「索引物理序」——该契约在**读侧单点**（此处）承担 O(k log k)，写侧换来 O(1) 摘除。
+    def _in_pos_order(self, ids):
+        return sorted(ids, key=self.pos.__getitem__)
+
     def subset(self, session=MISSING, layer=MISSING, time_range=None):
         """按维直取子集；返回 (ids | None, dims)。"""
         dims, srcs = [], []
@@ -258,20 +324,13 @@ class StgIndex:
         if not dims:
             return None, ()
         if len(srcs) > 1:
-            # 交集：三张表各自都是**物理序子序列**，除 time 外直接可用；
-            # time 先回排成物理序，再以最短表驱动（结果仍是物理序子序列）。
-            for i, d in enumerate(dims):
-                if d == "time":
-                    srcs[i] = sorted(srcs[i], key=self.pos.__getitem__)
+            # 交集：以**最短表**驱动（成员判定用集合，不看序），结果统一回排。
             k = min(range(len(srcs)), key=lambda i: len(srcs[i]))
             driver = srcs[k]
             others = [set(srcs[i]) for i in range(len(srcs)) if i != k]
-            return ([nid for nid in driver if all(nid in o for o in others)],
-                    tuple(dims))
-        ids = srcs[0]
-        if dims[0] == "time":
-            ids = sorted(ids, key=self.pos.__getitem__)
-        return list(ids), tuple(dims)
+            out = [nid for nid in driver if all(nid in o for o in others)]
+            return self._in_pos_order(out), tuple(dims)
+        return self._in_pos_order(srcs[0]), tuple(dims)
 
     # 生效条件：恒返回表规模读数 dict——nodes=pos 条数、sessions/layers=两张表的**非空桶**数、timed=by_time 条数、untimed/nonfinite=两表条数；只读、无副作用。
     def size(self):

@@ -9,9 +9,12 @@
 //!   * 读 spec.json → 调 API → 写 result.json（成功与 API 错误都写，error 字段区分）；
 //!   * 详细日志写 job/log.txt；stdout/stderr 保持安静（不污染 serve 控制台）；
 //!   * 退出码：0 成功 / 2 规格错 / 3 API 错误；
-//!   * **不得派生脱离生命周期的守护进程**：子进程须随执行器主进程退出
-//!     （Windows 下 kill/timeout 走 kill_tree 进程树回收；unix 只杀直接子进程，
-//!     孙进程存活即执行器违约）。
+//!   * **不得派生脱离生命周期的守护进程**：子进程须随执行器主进程退出。
+//!     Windows 下 kill/timeout 走 kill_tree 的 taskkill /T 进程树回收；unix 下走
+//!     kill_tree 的**进程组群杀**（`kill -TERM -<pgid>`，前提 = spawn_executor 以
+//!     `process_group(0)` 令执行器自成组长，见本文件对应两处 —— #156⑦ 落地前
+//!     unix 只杀直接子进程、孙进程成孤儿，该缺口即本行的历史语义）。
+//!     孙进程存活即执行器违约。
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -122,7 +125,31 @@ pub fn kill_tree(child: &mut Child) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = child.kill();
+        // #156⑦（K 组 · task-49）：抄 serve_start.py:445-448 的 `setsid` +
+        // `killpg(getpgid(pid), 15)` 范式——**按进程组**发 SIGTERM，一次覆盖执行器
+        // 派生的全部后代（孙进程 / 编译器 / 长睡测试进程），与 nt 臂 /T 等价。
+        // 前提：spawn_executor 已 `process_group(0)`（= setpgid(0,0)，见该函数），
+        // 执行器自成一组的组长 ⇒ **组 id == 子进程 pid**，无需再 getpgid 反查。
+        // 零第三方依赖（Cargo.toml `[dependencies]` 为空，D-005 不破）：Rust std 无
+        // killpg，故与 nt 臂的 taskkill 同一形态——调系统自带 `kill`（coreutils 既有
+        // 二进制；`kill` 本身也是 shell 内建，两条路都在）：`kill -TERM -<pgid>` 里
+        // 的 `-<pgid>` 即「发给该进程组」。
+        // 失败回落 child.kill()（宁可只杀直接子进程，也不什么都不做——与 nt 臂同一条）。
+        // 诚实边界：unix 臂的**真实**群杀行为 win32 本机不可动态验证（同
+        // hive/test_stop_tree_kill.py 已声明的边界）——本机验证面 = 源断言 + 编译通过
+        // + nt 臂回归不破；全修须 unix 机实跑。
+        let pid = child.id();
+        let group_signalled = Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !group_signalled {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -210,6 +237,16 @@ pub fn spawn_executor(
     }
     if let Some(a) = anchor {
         cmd.env("HIVE_RESULT_ANCHOR", a);
+    }
+    // #156⑦（K 组 · task-49）：非 Windows 下令执行器自成**进程组**（setpgid(0,0)）
+    // ——kill_tree 的 `kill -TERM -<pgid>` 按组群杀的**前提**。子孙进程默认继承该
+    // 组，故一次群杀覆盖全树（这正是 serve_start.py 侧 start_new_session 的同款前提，
+    // 见 hive/test_stop_tree_kill.py 的 C3 源断言）。
+    // 只在非 Windows 臂：nt 走 taskkill /T（按父子链树杀），不需要也不该设组。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
     }
     hide_window(&mut cmd);
     cmd.spawn()

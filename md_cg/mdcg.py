@@ -371,7 +371,11 @@ def expand_query_terms(query: str) -> list:
     for t in _en_zh:
         if t not in terms:
             terms.append(t)
-    return list(dict.fromkeys(terms))
+    # issue #150（2026-10-11）：**过滤空词项**——全标点/纯空白 query 经 normalize_en
+    # 归一后为 ""，若不滤出，下游 `_like` 的 `t in body_l` 因 `"" in s` 恒真而使
+    # **LIKE 恒真**（实测 q="???" 命中全库 6/6）。同族四处一并过滤：
+    # `_like` / `tag_bonus` / 负覆盖（3965）／写入侧 `add()` 的 tags；Rust 侧同步。
+    return [t for t in dict.fromkeys(terms) if t and t.strip()]
 
 
 # 生效条件：当 `s` 为字符串时，先去掉空白字符；去空白后长度≤1 返回 `{s}`，否则返回所有相邻 2-gram 集合。
@@ -2362,7 +2366,10 @@ class MdCG:
                 "strength": vd["conflict_strength"],
                 "emotional": (vd.get("emotional") or {}).get("bias"),
                 "unresolved_id": vd.get("unresolved_id")}
-        tags = list(tags or [])
+        # issue #150：**入口过滤空 tag**——空串 tag 会让 tag_bonus 恒发（`"" in q`）、
+        # 也会污染桶路由键；写入侧先净化，检索侧四处（expand_query_terms/_like/
+        # tag_bonus/负覆盖）另加非空守卫，两侧冗余是刻意的 defense-in-depth。
+        tags = [t for t in (tags or []) if str(t).strip()]
         # 标准语义摘要（semantic/canonical.py：词表真源 + OOV 审计，警告不拒绝）。
         # 语义校验失败不阻断写入（与 derived_from 建链降级同风格）。
         if semantic is not None:
@@ -3962,7 +3969,8 @@ class MdCG:
                         fm, content = nodefile.loads(f.read())
                 except (OSError, UnicodeDecodeError):
                     continue
-                if any(t in content for t in terms):
+                # issue #150：空词项会使本判据恒真 ⇒ 全部负记忆都被算作「覆盖本查询」。
+                if any(t and t in content for t in terms):
                     neg_coverage.append(e)
 
         stat = {"scanned": 0, "query": q, "gates": gates}
@@ -4323,7 +4331,9 @@ class MdCG:
                     else nodefile.positive_body(content))
             body_l = body.lower()
         tags_l = tags.lower()
-        return any(t in body_l or t.lower() in tags_l for t in terms)
+        # issue #150：空词项恒真（`"" in s` → True）⇒ 必须滤掉；否则 LIKE 预筛恒真、
+        # 全库入池。Rust `retrieval.rs::like` 同款（跨侧守卫钉住一致性）。
+        return any(t and (t in body_l or t.lower() in tags_l) for t in terms)
 
 # 生效条件：semantic_on() 为真、semantic.canonical.pair_hits 导入成功且该 doc 的 fm 有 semantic 时 raw = min(1.0, max(lexical_sim(qb, 该文档 normalize_en 后的 bigram, mode), pair_hits(fm["semantic"], q)) + tag_bonus)，否则 raw = min(1.0, sim + tag_bonus)；tag_bonus 仅在 fm.tags 中有 t 满足 str(t) in q 或 q in str(t) 时为 0.05，否则 0.0；pools 为真值时 raw 再乘 pooling.weight_of(...) 并夹到 [0,1]；返回 scored 列表；
     def _score(self, docs, q, qb, pools=None, mode=None):
@@ -4366,8 +4376,11 @@ class MdCG:
             # 基类默认即算即弃，行为与改动前逐位一致
             nb = self._doc_norm_bigrams(e, c)
             sim = lexical_sim(qb, nb, mode)
-            tag_bonus = 0.05 if any(str(t) in q or q in str(t)
-                                    for t in (fm.get("tags") or [])) else 0.0
+            # issue #150：空 tag（`"" in q` 恒真）与空 q（`q in str(t)` 恒真）都会让
+            # 加成恒发 ⇒ 两侧同步加守卫（Rust retrieval.rs 的 tag_bonus 同款）。
+            tag_bonus = 0.05 if q and any(
+                str(t) and (str(t) in q or q in str(t))
+                for t in (fm.get("tags") or [])) else 0.0
             if sem_on and _pair_hits is not None and fm.get("semantic"):
                 raw = min(1.0, max(sim, _pair_hits(fm["semantic"], q))
                           + tag_bonus)
