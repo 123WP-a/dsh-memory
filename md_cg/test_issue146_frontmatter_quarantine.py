@@ -35,7 +35,7 @@ r"""#146 守卫：坏 frontmatter 节点**隔离**而非炸库（+ 非法密级�
   C 非法密级不炸全员检索：
       C1 非法 sensitivity 节点存在时 `search` 不抛异常
       C2 `search_rrf` 不抛异常
-      C3 该节点判不可见（fail-closed），其余节点照常可见
+      C3 该节点被装载面隔离（不进索引）、检索面不可见，且 _readable 对非法密级独立判 False，隔离不改盘
   D 密文配非加密档 ⇒ 不可读：
       D1 同身份**异会话**读不到明文（HEAD 上读到明文 ⇒ 红）
       D2 解密结果恒 None（不是「读到空串」）
@@ -269,6 +269,7 @@ def main(argv=None) -> int:
                 'sensitivity: "private"', 'sensitivity: "internl"')
             with open(p_priv, "w", encoding="utf-8") as f:
                 f.write(t)
+            _priv_bytes = open(p_priv, "rb").read()
             sec2 = MdCGSecure(os.path.join(sb3, "lib"),
                               principal=Principal(tenant="t", actor="a",
                                                   clearance="secret",
@@ -289,16 +290,30 @@ def main(argv=None) -> int:
             except Exception as exc:                 # noqa: BLE001
                 err2 = "%s: %s" % (type(exc).__name__, exc)
             ok(err2 is None, "C2 search_rrf 不抛异常", err2)
+            # C3（#146 契约升级 2026-10-13）：装载面已把非法密级节点**隔离**
+            # （不进索引），故判据升级为「不在索引 + 检索面不可见 + _readable
+            # 独立判 False（隔离不得让判据变死代码）+ 隔离不改盘」。
             e_bad = sec2.index["nodes"].get("priv")
-            ok(e_bad is not None and sec2._readable(e_bad) is False,
-               "C3 非法密级节点判不可见（fail-closed）",
-               (sec2.index["nodes"].get("priv") or {}).get("sensitivity"))
+            ok(e_bad is None,
+               "C3 非法密级节点被判不可见（fail-closed）——装载面隔离，不进索引",
+               e_bad)
+            ok(not any("priv" in str(x) for x in r1),
+               "C3-检索面 被隔离节点不出现在 search 结果里",
+               [str(x) for x in r1])
+            _probe = {"id": "probe_sec", "sensitivity": "internl",
+                      "path": "knowledge/probe_sec.md"}
+            ok(sec2._readable(_probe) is False,
+               "C3-readability 非法密级独立判 False（隔离不得让 _readable 判据成死代码）",
+               sec2._readable(_probe))
+            ok(open(p_priv, "rb").read() == _priv_bytes,
+               "C3-不改盘 隔离不修改节点文件字节",
+               (len(_priv_bytes), len(open(p_priv, "rb").read())))
             ok(any("good" in str(x) for x in r1),
                "C3b 其余节点照常可见（未殃及全员）", len(r1))
         except Exception as exc:                     # noqa: BLE001
             for _l in ("C1 非法密级在场时 search 不抛异常",
                        "C2 search_rrf 不抛异常",
-                       "C3 非法密级节点判不可见（fail-closed）",
+                       "C3 非法密级节点被判不可见（fail-closed）——装载面隔离，不进索引",
                        "C3b 其余节点照常可见（未殃及全员）"):
                 ok(False, _l, "C 段异常：%s: %s" % (type(exc).__name__, exc))
 
