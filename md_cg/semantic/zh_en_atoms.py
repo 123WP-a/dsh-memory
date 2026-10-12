@@ -15,6 +15,8 @@
 """
 import re
 
+# LINGSHU_DUAL_SOURCE: independent —— 本表是手写 M() 表，与 canonical.atoms_zh()
+# （atoms.json 815 项）并非同一集合（issue #135；差异由守卫比对报告）。
 ZH_EN = {}
 
 # 生效条件：传入任意 zh 与 en（含空串等假值）时，段内无条件执行 ZH_EN[zh] = en，即以 zh 为键写入 en 并返回。

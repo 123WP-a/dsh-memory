@@ -50,8 +50,8 @@ def build():
                             "derived_from": "en_normalizer 全链",
                             "zh_atoms": len(ZH_EN)},
                    "map": out,
-                   # segment 贪心匹配键源（zh_en_atoms.ZH_EN 键 = 标准原子集，
-                   # 与 canonical.atoms_zh() 的 OOV 审计基准同源）
+                   # segment 贪心匹配键源（zh_en_atoms.ZH_EN 键）：独立手写表，不派生自 atoms.json；
+                   # 与 canonical.atoms_zh()/atoms.json 并非同一集合（非同源）；LINGSHU_DUAL_SOURCE: independent，见 issue #135
                    "zh_keys": sorted(ZH_EN.keys())}, f,
                   ensure_ascii=False, indent=1)
     return out
