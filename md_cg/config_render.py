@@ -82,10 +82,22 @@ def _fmt_anchor(e):
     return f"`{a['file']}::{sym}`"
 
 
+# 生效条件：text 经 str() 后竖线转 "\\|"、换行转空格并 strip，返回该串；不校验真值/类型。
+def _cell(text):
+    """表格单元格转义单点（issue #171；与 scripts/render_discipline.py::_cell 同款）。
+
+    病象：单元格裸拼接——登记文本/用户原话里的竖线被 markdown 读成列分隔符，
+    整行多出一格、整张表错位。
+    为什么只做转义：单元格是**数据**不是 markdown——值逐字保留（含竖线），只把
+    「数据里的竖线」与「表格分隔符」机械分开；无竖线的单元格输出与修复前逐字相同。
+    """
+    return str(text).replace("|", "\\|").replace("\n", " ").strip()
+
+
 def _rows_for(entries, cols):
     out = []
     for e in entries:
-        out.append("| " + " | ".join(cols(e)) + " |")
+        out.append("| " + " | ".join(_cell(c) for c in cols(e)) + " |")
     return out
 
 
@@ -131,8 +143,10 @@ def render_doc(cr) -> str:
     L.append("| name | kind | repo | 值域类型 | 备注 |")
     L.append("|---|---|---|---|---|")
     for r in cr.env_catalog():
-        L.append(f"| {r['name']} | {r['kind']} | {r['repo']} | {r['domain']} | "
-                 f"{r['notes']} |")
+        # issue #171：环境面表格同走转义单点（值域列含竖线不再破表）。
+        L.append("| %s | %s | %s | %s | %s |"
+                 % (_cell(r['name']), _cell(r['kind']), _cell(r['repo']),
+                    _cell(r['domain']), _cell(r['notes'])))
     L.append("")
 
     cols = (lambda e: [e["name"], e["kind"], "是" if e["tunable"] else "否",
