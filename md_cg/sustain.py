@@ -279,6 +279,9 @@ HEARTBEAT_GAP_THRESHOLD = 2.0 * DEFAULT_BEAT_INTERVAL
 #: 轮转自述行与心跳周期行的区分标记（统计只取 kind=="beat"，轮转痕不进时间序列）。
 HB_KIND_BEAT = "beat"
 HB_KIND_ROTATE = "rotate"
+#: D2：非 beat 业务档的台账行 kind——失败档**必须在台账可见**（不被
+#: `heartbeat_ledger_stats` 按 kind==HB_KIND_BEAT 的过滤吞掉）。
+HB_KIND_TICK = "tick"
 
 #: root → 已写次数（进程内；仅用于节流探测步长。跨进程各自计数，不影响正确性
 #: ——多写者共享同一活动文件时，任一方到点都会做一次 stat，只是探测得更密）。
@@ -290,6 +293,21 @@ def heartbeat_ledger_enabled(environ=None) -> bool:
     """心跳台账开关（缺省**开**）：`MDCG_HEARTBEAT_LEDGER` ∈ 关断字面量即关。"""
     env = os.environ if environ is None else environ
     return str(env.get(HEARTBEAT_ENV, "1")) not in AUTO_OFF_VALUES
+
+
+#: D1 解耦开关：**缺省关**（"0"）——既有单线程基线（六档顺序）逐位不变。
+BEAT_THREAD_ENV = "MDCG_SUSTAIN_BEAT_THREAD"
+
+
+# 生效条件：environ 缺省取 os.environ，读 BEAT_THREAD_ENV 键，其 str() 值不在 AUTO_OFF_VALUES 中即返回 True（缺键回落 "0"＝关）；否则 False。
+def beat_thread_enabled(environ=None) -> bool:
+    """心跳独立线程开关（缺省**关**）：`MDCG_SUSTAIN_BEAT_THREAD` ∈ 关断字面量即关。
+
+    开启后 `start()` 额外起一条 daemon 线程专用 beat：业务档阻塞时心跳仍推进
+    （判活面与被判活对象不再共用执行体，D1）。缺省关 ⇒ 既有行为逐位不变。
+    """
+    env = os.environ if environ is None else environ
+    return str(env.get(BEAT_THREAD_ENV, "0")) not in AUTO_OFF_VALUES
 
 
 # 生效条件：给定库根 root，返回 root/HEARTBEAT_LOG 的拼接路径。
@@ -435,7 +453,8 @@ def _hb_prune_shards(root: str):
 
 # 生效条件：开关关（heartbeat_ledger_enabled() 为假）时返回 None 且不写盘；否则先经 _hb_rotate_if_needed(root) 有界闸门，再向 root/HEARTBEAT_LOG 追加一行 {"t","name","pid","kind":"beat","ok"(,"error")}，返回该行；任何写入异常被吞掉并返回 None（心跳不可因台账而中断）。
 def record_heartbeat(root: str, name: str, *, ok: bool = True, error=None,
-                     t=None, pid=None, extra=None) -> dict:
+                     t=None, pid=None, extra=None,
+                     kind: str = HB_KIND_BEAT) -> dict:
     """追加一条**心跳周期**记录（append-only）——「连续 N 周期无断」的原始证据。
 
     字段（至少）：`t`（时间戳）+`name`（周期名）+`pid`+`ok`（该周期结果）；
@@ -446,7 +465,7 @@ def record_heartbeat(root: str, name: str, *, ok: bool = True, error=None,
         return None
     row = {"t": float(t) if t is not None else time.time(),
            "name": name, "pid": os.getpid() if pid is None else pid,
-           "kind": HB_KIND_BEAT, "ok": bool(ok)}
+           "kind": kind, "ok": bool(ok)}
     if error is not None:
         row["error"] = str(error)[:200]
     if extra:
@@ -1382,6 +1401,7 @@ class SustainLoop:
         self._ticks_wrapped = False          # 六档进度面包装的幂等标记
         self._started_at = None
         self._th = None
+        self._beat_th = None                 # D1：独立心跳线程（缺省关）
         self._stop = threading.Event()
         self._lock = threading.Lock()
 
@@ -1482,6 +1502,13 @@ class SustainLoop:
                 fn(*a, **kw)
             except Exception as e:                   # noqa: BLE001
                 ok_ = False
+                if name != "beat":
+                    # D2：失败档**必须在台账可见**——非 beat 业务档每轮失败追加
+                    # 一条 kind="tick" 行（beat 自身失败已由 beat() 记 ok=False）。
+                    record_heartbeat(self.cg.root, name, ok=False,
+                                     error="%s: %s" % (type(e).__name__,
+                                                       str(e)[:200]),
+                                     kind=HB_KIND_TICK)
                 self.last_tick_error = {"name": name, "t": time.time(),
                                         "error": "%s: %s" % (type(e).__name__,
                                                              str(e)[:200])}
@@ -1529,6 +1556,12 @@ class SustainLoop:
         self._th = threading.Thread(target=self._run, name="mdcg-sustain",
                                     daemon=True)
         self._th.start()
+        if beat_thread_enabled():
+            # D1：心跳独立线程（缺省关）——业务档阻塞时心跳仍推进。
+            self._beat_th = threading.Thread(target=self._beat_loop,
+                                             name="mdcg-sustain-beat",
+                                             daemon=True)
+            self._beat_th.start()
         return self
 
 # 生效条件：调用时置 _stop 事件，self._th 非 None 时 join(timeout)（默认 3.0）后置为 None，随后 clear_stamp(self.name, self.d)，返回 self；
@@ -1537,6 +1570,10 @@ class SustainLoop:
         if self._th is not None:
             self._th.join(timeout)
             self._th = None
+        bt = getattr(self, "_beat_th", None)
+        if bt is not None:
+            bt.join(timeout)                 # _stop 已置位 ⇒ 心跳线程即刻退出
+            self._beat_th = None
         clear_stamp(self.name, self.d)
         return self
 
@@ -1588,6 +1625,22 @@ class SustainLoop:
                     pass                       # 睡眠周期失败不中断常驻
                 next_sleep = now + self.sleep_interval
             self._stop.wait(_POLL)
+
+    # ---- D1：心跳独立线程（缺省关）----
+
+# 生效条件：由 start() 在 beat_thread_enabled() 为真时起一条 daemon 线程执行；循环里每 beat_interval 调一次 self.beat()，异常吞掉（心跳失败不拖垮常驻），_stop 置位即退出。
+    def _beat_loop(self):
+        """独立心跳线程体（D1）：与业务档**不共用执行体**——业务档阻塞时心跳仍推进。
+
+        唯一改动的是 beat 的**调度源**（多一条线程），复用既有 `beat()`（写戳 +
+        台账，纯追加、无共享可变状态）；缺省关时本线程不启动，既有单线程基线
+        逐位不变。线程退出由 `_stop` 事件驱动（`stop()` 置位后 wait 立即返回）。
+        """
+        while not self._stop.wait(self.beat_interval):
+            try:
+                self.beat()
+            except Exception:                    # noqa: BLE001
+                pass                             # 心跳失败不中断常驻
 
 # 生效条件：以 apply=self.auto_tidy 调 writelimit.tidy_contextual(self.cg, actor="sustain_tidy")，把 t/scanned/groups/members/applied_count/auto_tidy 记入 self.last_tidy 与 tidys（仅保留最近 20 条），随后调 _tick_conformance()；auto_tidy 为假时只盘点不落盘；
     def _tick_tidy(self):
