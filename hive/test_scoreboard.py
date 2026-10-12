@@ -102,7 +102,9 @@ def run_checks(sb):
        doc["legacy_ids"] == ["h1790492122424_3918"]
        and doc["skipped_ids"] == ["weird_dir"]
        and doc["bad_ids"] == ["h_A端_T9_输出单元_0001"]
-       and doc["totals"]["jobs"] == 6, doc["totals"])
+       # #158 订正：jobs 由 6 → 5。理由＝**断言目标不变**（「jobs 计的是进入评分的件数」），
+       # 变的是它算错的那部分：修前坏件既进 bad_ids 又计分，jobs 把坏件也算进去。
+       and doc["totals"]["jobs"] == 5, doc["totals"])
 
     ok("S4 round＝同键重投次数（2 投 ⇒ round=1 ⇒ Δ=3，base=3）",
        by_unit[("A端", "T1", "输出单元")]["round"] == 1
@@ -121,9 +123,12 @@ def run_checks(sb):
        sb.UNIT_BASE["验证单元"] == 6 and sb.UNIT_BASE["输出单元"] == 3
        and by_unit[("A端", "T1", "验证单元")]["base"] == 6, "")
 
-    ok("S8 by_task 聚合：T1 jobs=3 done=2 error=1 Δ=15 完成率=2/3",
+    # #158 订正：Δ 由 15 → 4。理由＝**断言目标不变**（「T1 聚合 = 其各单元 Δ 之和」），
+    # 变的是它算错的那部分：修前结算的 E 是常量 1.0 ⇒ T1 的 error 那件也拿 Δ=12；
+    # 修后 E 实测（该件 done=0 ⇒ E=0 ⇒ Δ=1），重投那件仍为 3 ⇒ 3+1=4。
+    ok("S8 by_task 聚合：T1 jobs=3 done=2 error=1 Δ=4（E 实测后）完成率=2/3",
        by_task["T1"]["jobs"] == 3 and by_task["T1"]["done"] == 2
-       and by_task["T1"]["error"] == 1 and by_task["T1"]["delta_sum"] == 15
+       and by_task["T1"]["error"] == 1 and by_task["T1"]["delta_sum"] == 4
        and abs(by_task["T1"]["completion_rate"] - 2.0 / 3) < 1e-9, by_task.get("T1"))
 
     ok("S9 identity 大小写变体被报出（不合并）",
@@ -136,9 +141,16 @@ def run_checks(sb):
        json.dumps(sb.build(J), sort_keys=True, ensure_ascii=False)
        == json.dumps(sb.build(J), sort_keys=True, ensure_ascii=False), "")
 
-    ok("S12 不编造：无终态任务的完成率为 None；Δ 合计=39",
-       by_task["T9"]["completion_rate"] is None
-       and doc["totals"]["delta_sum"] == 39, (by_task["T9"].get("completion_rate"), doc["totals"]["delta_sum"]))
+    # #158 订正：本条的**目标不变**＝「不编造完成率」＋「Δ 合计如实」；变的是它算错的
+    # 那部分：修前坏件 T9 既进 bad_ids 又拿 Δ=6 并产生一条完成率 None 的任务行，
+    # 合计 39 内含这 6 分。修后坏件不产生评分行 ⇒ 改钉「T9 不在 by_task」＋
+    # 「无编造完成率（凡有值必在 [0,1]）」＋「合计 22＝3+1+6+12」。
+    ok("S12 不编造：坏件不产生评分行（T9 不在 by_task）＋完成率无编造＋Δ 合计=22",
+       ("T9" not in by_task)
+       and all(a["completion_rate"] is None or 0.0 <= a["completion_rate"] <= 1.0
+               for a in doc["by_task"])
+       and doc["totals"]["delta_sum"] == 22,
+       (sorted(by_task), doc["totals"]["delta_sum"]))
 
     shutil.rmtree(root, ignore_errors=True)
     return doc
@@ -168,12 +180,20 @@ _MUTATIONS = (
     ("M6 关历史格式分流（legacy 并入 skipped）",
      "            (legacy if LEGACY_RE.match(name) else skipped).append(name)",
      "            skipped.append(name)  # MUT", {"S3"}),
+    # #158 订正：M7 期望集由 {S12,S7,S8} → {S12,S7}。理由＝**变异目标不变**（「关单元
+    # 定档 ⇒ 相关断言转红」），变的是它算错的那部分：E 改实测后，**全失败单元的 Δ 被
+    # 保底到 1、与 base 无关**，故 T1 的聚合（3+1=4）不再随 base 变 ⇒ S8 不再敏感。
     ("M7 base 恒兜底（不看单元表）",
      '    base = UNIT_BASE.get(unit, BASE_DEFAULT)',
-     "    base = BASE_DEFAULT  # MUT", {"S7", "S8", "S12"}),
+     "    base = BASE_DEFAULT  # MUT", {"S7", "S12"}),
+    # #158 订正：M8 期望集由 {S8,S12} → {S8}。理由＝**变异目标不变**（「编造完成率必须
+    # 被抓」），变的是它算错的那部分：S12 改写后钉的是**结构面**（坏件不产生评分行 +
+    # 值域 [0,1]），而 1.0 落在值域内 ⇒ S12 不再敏感；编造仍被 S8 的**具体值**
+    # `completion_rate == 2/3` 抓住（该任务 3 件里 1 件失败，编造成 1.0 即暴露）⇒
+    # 判别力未丢，只是归属从 S12 收到 S8。
     ("M8 完成率恒 1.0（编造）",
      '        a["completion_rate"] = (a["done"] / term) if term else None',
-     '        a["completion_rate"] = 1.0  # MUT', {"S8", "S12"}),
+     '        a["completion_rate"] = 1.0  # MUT', {"S8"}),
 )
 
 

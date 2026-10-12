@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -251,12 +252,16 @@ try:
         RS = f.read()
     check("4.1 spawn_executor 以 process_group(0) 令执行器自成进程组（群杀前提）",
           "cmd.process_group(0)" in RS, "exec.rs 缺 process_group(0)")
-    check("4.2 kill_tree posix 臂按**进程组**发 TERM（kill -TERM -<pgid>）",
-          '"-TERM"' in RS and 'format!("-{pid}")' in RS,
-          "exec.rs posix 臂群杀缺失（仍只 child.kill()）")
-    check("4.3 群杀失败仍回落 child.kill()（宁可只杀直接子进程，不什么都不做）",
-          "if !group_signalled {" in RS and "child.kill()" in RS,
-          "回落臂缺失")
+    check("4.2 kill_tree posix 臂按**进程组**发 TERM，且 argv 带 `--` 分隔符",
+          '"-TERM", "--"' in RS and 'format!("-{pid}")' in RS,
+          "exec.rs posix 臂群杀缺失，或缺 `--`：procps 下无 `--` 的 `-<N>` 走选项/信号解析"
+          "（不是负 pid），实测同一 argv 在不同 N 下时通时不通、pgid≥20 静默 no-op 且 rc=0"
+          " ⇒ s.success() 为真 ⇒ 回落分支不触发 ⇒ 直接子进程也不被杀")
+    check("4.3 直接子进程**无条件**杀（不与群杀成败耦合）",
+          "let _ = child.kill();" in RS
+          and re.search(r"if\s*!\s*group_signalled\s*\{[^}]*child\.kill", RS) is None
+          and "群杀未送达" in RS,
+          "回落臂仍与群杀成败耦合：群杀静默 no-op（rc=0）时直接子进程也活；或告警缺失")
     check("4.4 nt 臂 taskkill /T /F 未漂移（同仓口径一致）",
           '"/T", "/F"' in RS, "exec.rs 的 taskkill /T /F 形态丢失")
 except OSError as e:

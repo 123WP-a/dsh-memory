@@ -132,15 +132,25 @@ pub fn kill_tree(child: &mut Child) {
         // 执行器自成一组的组长 ⇒ **组 id == 子进程 pid**，无需再 getpgid 反查。
         // 零第三方依赖（Cargo.toml `[dependencies]` 为空，D-005 不破）：Rust std 无
         // killpg，故与 nt 臂的 taskkill 同一形态——调系统自带 `kill`（coreutils 既有
-        // 二进制；`kill` 本身也是 shell 内建，两条路都在）：`kill -TERM -<pgid>` 里
-        // 的 `-<pgid>` 即「发给该进程组」。
-        // 失败回落 child.kill()（宁可只杀直接子进程，也不什么都不做——与 nt 臂同一条）。
+        // 二进制；`kill` 本身也是 shell 内建，两条路都在）：`kill -TERM -- -<pgid>` 里
+        // 的 `-<pgid>` 即「发给该进程组」（`--` 分隔符**必需**，理由见下方 argv 处）。
+        // 直接子进程**无条件**杀（见下方 argv 处的定因）；群杀失败另发告警，不静默。
         // 诚实边界：unix 臂的**真实**群杀行为 win32 本机不可动态验证（同
         // hive/test_stop_tree_kill.py 已声明的边界）——本机验证面 = 源断言 + 编译通过
-        // + nt 臂回归不破；全修须 unix 机实跑。
+        // + nt 臂回归不破；**Linux 容器实跑已做**（见下方 argv 处定因读数）。
         let pid = child.id();
+        // ★ **`--` 不是可选的**（K 组 · hive-check 红定因 · 2026-10-12）：
+        // procps `kill` 的 getopt 把**无 `--` 的 `-<N>`** 按选项/信号号路径解析，而不是
+        // 恒按「负 pid = 进程组」。Debian/procps-ng 4.0.2 容器实测（每组 24 次、子进程
+        // 装 SIGTERM 处理器记录收信）：同一 argv 在不同 N 下**时通时不通** ——
+        // N=8/13/16/18 命中（rc=1，组内 leader+grand 均收到 TERM），N≥20 起**静默
+        // no-op**（rc=**0**、stderr 空、谁都没收到）。静默 no-op 时 `s.success()` 为真
+        // ⇒ 下面的回落分支不触发 ⇒ **直接子进程也没被杀**（base 语义是必杀）。
+        // 加 `--` 后目标恒按负 pid 解析：同批 24/24 命中、10/10 命中（两轮独立探针）。
+        // 该缺陷即 CI `hive-check` 的 `kill_channel` / `timeout_kills` 两腿红的根因
+        // （win32 本机 nt 臂不走这条路 ⇒ 本机 68/0、CI 66/2）。
         let group_signalled = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
+            .args(["-TERM", "--", &format!("-{pid}")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -148,8 +158,18 @@ pub fn kill_tree(child: &mut Child) {
             .map(|s| s.success())
             .unwrap_or(false);
         if !group_signalled {
-            let _ = child.kill();
+            // 群杀未送达**不得静默**（否则「后代存活」这一事实在盘面不可见）。
+            eprintln!(
+                "[hive] 告警：pid {pid} 的进程组 SIGTERM 未送达（kill 非零退出或不可执行）\
+                 —— 群杀失败，执行器派生的后代进程可能存活"
+            );
         }
+        // 直接子进程**无条件**杀：它是执行器本体，本函数的历史语义（修 #156⑦ 前即为
+        // `child.kill()`）与 nt 臂（taskkill /T /F）都保证它必死。把「群杀是否送达」与
+        // 「直接子进程是否死」解耦——修前二者耦合成「群杀成功才杀」，而群杀在解析失败
+        // 时**静默成功**（rc=0），于是直接子进程也一并没被杀：kill 请求发出后任务照跑到
+        // 自己的超时/自然结束（实测 timeout_s=5s 的任务实际 30.16s 才落 timeout 终态）。
+        let _ = child.kill();
     }
 }
 

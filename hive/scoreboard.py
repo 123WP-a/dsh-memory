@@ -148,7 +148,11 @@ def scan(jobs_dir: str):
         r = job_record(d)
         r.update({"identity": ident, "task": task, "unit": unit, "number": num})
         if not r["state"]:
+            # #158：坏件/空目录**只进 bad_ids，不计分**——修前这里 append 之后仍
+            # 无条件 `recs.append(r)`，于是同一件既被标「读件失败」又拿满 Δ，
+            # 与 bad 这一分类自相矛盾（S3 的 jobs 计数也据此订正）。
             bad.append(name)
+            continue
         recs.append(r)
     return recs, skipped, legacy, bad
 
@@ -172,9 +176,13 @@ def score(records):
         # round = 同键重投次数（首个 job 之后的每一次重投）
         rounds = max(0, n - 1)
         base = UNIT_BASE.get(unit, BASE_DEFAULT)
-        # E：未声明验收条目 ⇒ 未计量（e_measured=False，按 1 计但标注）
-        e = 1.0
-        e_measured = False
+        # E：**实测完成度**（#158 修复）。修前是常量 `e = 1.0`（e_measured=False）⇒
+        # 上面算好的 done/error/timeout/killed/pending **一个都没进 settle**，后果：
+        # 「单次失败」与「单次成功」同分（都是 base×2），而「失败后重投成功」因
+        # round=1 分母翻倍却仍按 E=1 计 ⇒ 反倒低于单次成功（**分数与结果反向**）。
+        # 口径：E = done / n（n>0；未终态的 pending 计入 n ⇒ 在途成果完成率如实下降）。
+        e = (float(done) / n) if n else 0.0
+        e_measured = True
         delta, formula = settle(base, e, rounds)
         by_unit.append({
             "identity": ident, "task": task, "unit": unit,
@@ -251,7 +259,8 @@ def build(jobs_dir: str):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="蜂巢对内域评分器（子代理 × 项目完成情况）")
     ap.add_argument("--jobs", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs"))
-    ap.add_argument("--write", action="store_true", help="落盘 hive/jobs/_scoreboard.json")
+    ap.add_argument("--write", action="store_true",
+                    help="append-only 落盘 hive/jobs/_scoreboard.jsonl（每次运行追加一行）")
     ap.add_argument("--json", action="store_true", help="打印完整 JSON")
     args = ap.parse_args(argv)
 
@@ -281,12 +290,14 @@ def main(argv=None):
             print("  %-6s %-18s %-5s jobs=%-2d Δ=%-3d det=%-2d" %
                   (r["identity"], r["task"][:18], r["unit"], r["jobs"], r["delta"], r["deterministic"]))
     if args.write:
-        p = os.path.join(args.jobs, "_scoreboard.json")
-        with io.open(p, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(doc, fh, ensure_ascii=False, indent=1, sort_keys=True)
-            fh.write("\n")
+        # #158：**append-only**（规格 §7.5）。修前用 "w" 覆写单文件 ⇒ 历史运行被静默
+        # 丢弃、无法复盘「某一轮评分相对上一轮变了什么」。改为 JSONL：每次运行追加一行
+        # （一行 = 一轮快照；读回取末行即最新）。
+        p = os.path.join(args.jobs, "_scoreboard.jsonl")
+        with io.open(p, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(doc, ensure_ascii=False, sort_keys=True) + "\n")
         print()
-        print("已落盘:", p)
+        print("已追加:", p)
     return 0
 
 
