@@ -32,21 +32,21 @@ RULES = {
  'type': 'str'},
     'MDCG_CN_GRAMS': {'bool_like': True, 'type': 'bool'},
     'MDCG_D_META': {'bool_like': True, 'type': 'bool'},
-    'MDCG_EN_ATOMS': {'bool_like': True, 'type': 'bool'},
+    'MDCG_EN_ATOMS': {'enum': ['norm', 'raw'], 'type': 'str'},
     'MDCG_EXPLORE_BUDGET_MAX': {'type': 'str'},
     'MDCG_EXPLORE_BUDGET_WINDOW': {'type': 'str'},
     'MDCG_EXPORT_ROOT': {'bool_like': True, 'type': 'bool'},
     'MDCG_FRESHNESS': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S1B_BUCKET': {'bool_like': True, 'type': 'bool'},
+    'MDCG_GATE_S1B_BUCKET': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_GATE_S1_DOMAIN': {'bool_like': True, 'type': 'bool'},
     'MDCG_GATE_S2_COND': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S3_SPREAD': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S4_LAYER': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S5_NEG': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S6_CROSSCHECK': {'bool_like': True, 'type': 'bool'},
-    'MDCG_GATE_S7_POSTINGS': {'bool_like': True, 'type': 'bool'},
+    'MDCG_GATE_S3_SPREAD': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
+    'MDCG_GATE_S4_LAYER': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
+    'MDCG_GATE_S5_NEG': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
+    'MDCG_GATE_S6_CROSSCHECK': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
+    'MDCG_GATE_S7_POSTINGS': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_HEARTBEAT_LEDGER': {'bool_like': True, 'type': 'bool'},
-    'MDCG_HOTCACHE': {'bool_like': True, 'type': 'bool'},
+    'MDCG_HOTCACHE': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_HOTCACHE_MAX_NODES': {'min': 1, 'type': 'int'},
     'MDCG_HOTCACHE_MAX_QUERIES': {'min': 1, 'type': 'int'},
     'MDCG_INGEST_ROOT': {'bool_like': True, 'type': 'bool'},
@@ -56,15 +56,15 @@ RULES = {
     'MDCG_NEG_SIM': {'max': 1.0, 'min': 0.0, 'type': 'float'},
     'MDCG_POOLING': {'bool_like': True, 'type': 'bool'},
     'MDCG_PROPOSAL_EMOTION': {'bool_like': True, 'type': 'bool'},
-    'MDCG_REACH': {'bool_like': True, 'type': 'bool'},
-    'MDCG_REACH_DIFFUSE': {'bool_like': True, 'type': 'bool'},
+    'MDCG_REACH': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
+    'MDCG_REACH_DIFFUSE': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_REACH_TTL': {'min': 0.0, 'type': 'float'},
-    'MDCG_READ_CACHE': {'bool_like': True, 'type': 'bool'},
+    'MDCG_READ_CACHE': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_RECONCILE': {'bool_like': True, 'type': 'bool'},
-    'MDCG_RETRIEVAL_PIPELINE': {'bool_like': True, 'type': 'bool'},
+    'MDCG_RETRIEVAL_PIPELINE': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_S7_FRESHNESS': {'bool_like': True, 'type': 'bool'},
     'MDCG_SCORE_MODE': {'enum': ['legacy', 'jaccard'], 'type': 'str'},
-    'MDCG_SEMANTIC': {'bool_like': True, 'type': 'bool'},
+    'MDCG_SEMANTIC': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_SLEEP': {'bool_like': True, 'type': 'bool'},
     'MDCG_SLEEP_GITDIR': {'type': 'str'},
     'MDCG_SLEEP_INTERVAL': {'type': 'str'},
@@ -81,7 +81,7 @@ RULES = {
     'MDCG_TEMPORAL_GAMMA': {'min': 0.0, 'type': 'float'},
     'MDCG_TENANT': {'type': 'str'},
     'MDCG_TOOL_FACE': {'bool_like': True, 'type': 'bool'},
-    'MDCG_UNIFY_QUERY': {'bool_like': True, 'type': 'bool'},
+    'MDCG_UNIFY_QUERY': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_WRITELIMIT': {'bool_like': True, 'type': 'bool'},
     'PREDICTION_META_DIM': {'type': 'str'},
     'PREDICTION_META_PROXY': {'type': 'str'},
@@ -341,6 +341,17 @@ def coerce(name, raw):
         return True, raw, None
     if t == "bool" and r.get("bool_like"):
         s = str(raw)
+        tl = r.get("true_literals")
+        if tl:
+            # 严格开关：源码判 == "<lit>"，故真值只认该词表、假值只认明确假值，其余**拒收**
+            # （fail-closed：不把 "true" 这类会被源码当假的写法静默放过）
+            if s in tuple(tl):
+                return True, True, None
+            if s in _FALSE:
+                return True, False, None
+            return False, None, (name + ": 该开关源码判 == " + repr(tl[0])
+                                 + "，只接受 " + repr(tuple(tl) + _FALSE)
+                                 + "；得到 " + repr(raw))
         if s in _TRUE:
             return True, True, None
         if s in _FALSE:
@@ -390,6 +401,8 @@ CASES = (
     (_ENV_AUTONOMY_MODE, "god", False),
     (_ENV_SLEEP_MERGE, "auto", True),
     (_ENV_SLEEP_MERGE, "later", False),
+    ("MDCG_RETRIEVAL_PIPELINE", "1", True),
+    ("MDCG_RETRIEVAL_PIPELINE", "true", False),
     ("MDCG_HOTCACHE", "1", True),
     ("MDCG_HOTCACHE", "0", True),
     ("MDCG_HOTCACHE", "maybe", False),

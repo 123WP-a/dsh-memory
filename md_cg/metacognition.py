@@ -55,6 +55,9 @@ D_LOW = 0.10                 # P_gap：D_norm < 此值视为「信息差已收�
 MIN_SAMPLES = 5              # 样本不足 → insufficient_data
 D2_EMOTION = 0.05            # 二阶变化显著阈值
 BINS = ((0.0, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01))
+#: issue #121（2026-10-11）：越界 confidence 的**抽样可追**上限——返回体给计数 +
+#: 最多这么多个被丢弃 id（全量列表会随库增长无界膨胀；计数面恒完整，故不静默）。
+DROPPED_SAMPLE_MAX = 20
 
 
 # --------------------------------------------------------------------------
@@ -187,6 +190,15 @@ def calibration(cg, max_scan: int = 2000) -> dict:
     exp_sum = 0.0
     used = 0
     total_pos = total_neg = 0
+    # issue #121（2026-10-11）：**越界 confidence 不再静默丢弃**。
+    # 修前：conf 落在 BINS 覆盖域（[0, 1.01)）之外的节点照计 used/exp_sum/
+    # total_pos/total_neg（进分母），却因不落任何桶而对 ECE 分子零贡献 ⇒ ECE 被
+    # 系统性低估；且 n_nodes 与 Σbins.n_nodes 对不上而无人报。
+    # 现逐条记账并透出，**不变量**：n_nodes == Σbins.n_nodes + dropped。
+    # 口径不变：越界节点照旧进 used/exp_sum/总证据（分母口径一字不改），
+    # 只把「没进桶」这件事从静默变成可观测。
+    dropped_count = 0
+    dropped_ids = []
     for nid, e in _nodes(cg).items():
         if used >= int(max_scan):
             break
@@ -202,6 +214,7 @@ def calibration(cg, max_scan: int = 2000) -> dict:
         exp_sum += conf
         total_pos += pos
         total_neg += neg
+        placed = False
         for lo, hi in BINS:
             if lo <= conf < hi:
                 b = buckets[f"{lo:g}-{hi:g}"]
@@ -209,9 +222,18 @@ def calibration(cg, max_scan: int = 2000) -> dict:
                 b["conf_sum"] += conf
                 b["pos"] += pos
                 b["neg"] += neg
+                placed = True
                 break
+        if not placed:
+            # 越界（conf < 0 或 conf >= BINS 覆盖上界 1.01）：计 dropped 并抽样留 id。
+            # 注意判据是 lo <= conf < hi，上界 1.01 已把 conf==1.0 正常覆盖。
+            dropped_count += 1
+            if len(dropped_ids) < DROPPED_SAMPLE_MAX:
+                dropped_ids.append(nid)
     if used == 0:
         return {"ok": False, "reason": "insufficient_data", "n_nodes": 0,
+                "dropped": 0, "out_of_range": 0, "dropped_ids": [],
+                "dropped_ids_truncated": False,
                 "note": "无带证据的节点：先 verify() 积累验证记录"}
     expected = exp_sum / used
     actual = total_pos / max(1, total_pos + total_neg)
@@ -241,6 +263,12 @@ def calibration(cg, max_scan: int = 2000) -> dict:
         verdict = "calibrated"
     return {
         "ok": True, "n_nodes": used,
+        # issue #121：可观测面——**越界丢弃**的计数与抽样 id（不静默）。
+        # dropped 是不变量的加数项（今日唯一丢因即越界；将来新增丢因须并入此数）。
+        "dropped": dropped_count,
+        "out_of_range": dropped_count,
+        "dropped_ids": list(dropped_ids),
+        "dropped_ids_truncated": dropped_count > len(dropped_ids),
         "n_evidence": total_ev,
         "expected_accuracy": round(expected, 4),
         "actual_accuracy": round(actual, 4),

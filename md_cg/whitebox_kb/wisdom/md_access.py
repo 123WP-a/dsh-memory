@@ -63,9 +63,29 @@ COLS = ("id", "content", "modality", "spatial_coordinates",
         "entity_id")
 _COL_IDX = {c: i for i, c in enumerate(COLS)}
 
-#: md 语料层目录权威序（行序 = _restore 插入序的关键；与 mdcg.LAYERS 一致）
-LAYERS = ("anchor", "structural", "knowledge", "contextual", "self",
-          "rejected", "unresolved", "goals")
+#: md 语料层目录权威序（行序 = _restore 插入序的关键）。
+#: **#122（2026-10-12 DSH 端）：本符号不再是第二份权威** —— 它**转发**自单一真源
+#: `md_cg.mdcg.LAYERS`（取值与顺序由真源决定，此处不复制字面量）。修前此处是一份
+#: 独立的同值元组：值一致靠人工同步、无机制保证，且审计面（conformance.enum_spaces）
+#: 只声明 mdcg 一份 ⇒ 白箱侧悄悄换序无人知情（而顺序承重：_restore 插入序）。
+#: 装载形态：① 包形态（md_cg.whitebox_kb.wisdom.md_access）→ 相对导入；
+#: ② 仓库根在 sys.path；③ wisdom 目录平铺在 sys.path（本仓守卫走这条）。
+#: 三者皆不可达（真正脱离 md_cg 的独立部署）时，才回落到下一行那份**显式标记**的
+#: 字面量，并把 LAYERS_SOURCE 置 "literal-fallback" —— 该标记供 conformance 与守卫
+#: 判「转发是否真的生效」，避免回落被静默当成真源。
+LAYERS_SOURCE = "md_cg.mdcg"
+try:
+    from ...mdcg import LAYERS as LAYERS                     # ① 包形态
+except ImportError:
+    try:
+        from md_cg.mdcg import LAYERS as LAYERS              # ② 仓库根在 sys.path
+    except ImportError:
+        try:
+            from mdcg import LAYERS as LAYERS                # ③ 平铺形态
+        except ImportError:                                  # ④ 独立部署：显式回落
+            LAYERS = ("anchor", "structural", "knowledge", "contextual", "self",
+                      "rejected", "unresolved", "goals")
+            LAYERS_SOURCE = "literal-fallback"
 
 
 # --------------------------------------------------------------------------

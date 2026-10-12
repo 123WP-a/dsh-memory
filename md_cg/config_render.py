@@ -153,9 +153,22 @@ def _rule_for(e):
     r = {"type": e.get("value_type") or "str"}
     name = e.get("env_name") or e["name"]
     # ① 真开关/失败放行语义 → 布尔
-    if e.get("semantic") in ("on", "off", "fail-open"):
+    dom = e.get("domain") or ""
+    if dom.startswith("bool:"):
+        # 域带真值词表（"bool:1" = 源码判 == "1"）⇒ **严格布尔**：真值词表以源码为准
+        # （issue #138：此前一律给宽词表 true/yes/on，与源码 == "1" 语义**相反**）
         r["type"] = "bool"
         r["bool_like"] = True
+        r["true_literals"] = [x for x in dom[5:].split(",") if x]
+    elif e.get("semantic") in ("on", "off", "fail-open"):
+        r["type"] = "bool"
+        r["bool_like"] = True
+    # ①b 域带枚举（"enum:a|b"）⇒ 枚举约束（覆盖 semantic 推出的布尔；issue #138 · EN_ATOMS）
+    if dom.startswith("enum:"):
+        r["type"] = "str"
+        r["enum"] = [x for x in dom[5:].split("|") if x]
+        r.pop("bool_like", None)
+        r.pop("true_literals", None)
     # ② 已知枚举 → 枚举约束
     if name in ENUMS:
         r["type"] = "str"
@@ -217,6 +230,17 @@ def coerce(name, raw):
         return True, raw, None
     if t == "bool" and r.get("bool_like"):
         s = str(raw)
+        tl = r.get("true_literals")
+        if tl:
+            # 严格开关：源码判 == "<lit>"，故真值只认该词表、假值只认明确假值，其余**拒收**
+            # （fail-closed：不把 "true" 这类会被源码当假的写法静默放过）
+            if s in tuple(tl):
+                return True, True, None
+            if s in _FALSE:
+                return True, False, None
+            return False, None, (name + ": 该开关源码判 == " + repr(tl[0])
+                                 + "，只接受 " + repr(tuple(tl) + _FALSE)
+                                 + "；得到 " + repr(raw))
         if s in _TRUE:
             return True, True, None
         if s in _FALSE:
@@ -266,6 +290,8 @@ CASES = (
     (_ENV_AUTONOMY_MODE, "god", False),
     (_ENV_SLEEP_MERGE, "auto", True),
     (_ENV_SLEEP_MERGE, "later", False),
+    ("MDCG_RETRIEVAL_PIPELINE", "1", True),
+    ("MDCG_RETRIEVAL_PIPELINE", "true", False),
     ("MDCG_HOTCACHE", "1", True),
     ("MDCG_HOTCACHE", "0", True),
     ("MDCG_HOTCACHE", "maybe", False),

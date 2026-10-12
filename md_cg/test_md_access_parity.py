@@ -132,15 +132,90 @@ def _param_groups(arg_tpls, samples):
              for t in arg_tpls] for i in range(n)]
 
 
+_LIT_N = 0
+_LIT_RED = 0
+
+
+def _literal_group(mutate=""):
+    """#122：**不依赖语料根**的字面量判据（干净检出上必须照判，不许被 SKIP 掉）。
+
+    钉三件事：
+      ① 白箱侧 `md_access.LAYERS` 与权威 `md_cg.mdcg.LAYERS` **取值 + 顺序逐位相同**；
+      ② 它是**真转发**（同一对象 `is`），而不是「值恰好相同的第二份副本」；
+      ③ 审计面 `conformance.enum_spaces()` **看得见**这份曾经的第二权威的现状。
+    `mutate` 注入病灶等价物（order / copy / extra / audit），自证判据有判别力。
+    """
+    global _LIT_N, _LIT_RED
+    from .mdcg import LAYERS as _AUTH
+    from . import conformance as _CF
+    import md_access as _ma
+    lay = tuple(_ma.LAYERS)
+    if mutate == "order":                      # 尾两段对调（顺序承重面）
+        lay = lay[:-2] + (lay[-1], lay[-2])
+    elif mutate == "extra":
+        lay = lay + ("legacy",)
+    elif mutate == "copy":                     # 值相同但**另立对象**（假转发）
+        lay = tuple(list(_AUTH))               # 注意：tuple(已是元组) 会返回同一对象，故先转 list
+    if mutate in ("order", "extra", "copy"):
+        _ma.LAYERS = lay
+
+    same = tuple(_ma.LAYERS) == tuple(_AUTH)
+    _LIT_N += 1
+    _LIT_RED += 0 if same else 1
+    print("  [%s] A1 白箱 LAYERS 与 mdcg.LAYERS 取值+顺序逐位相同（%d 段）"
+          % ("PASS" if same else "FAIL", len(_AUTH)))
+
+    ident = _ma.LAYERS is _AUTH
+    _LIT_N += 1
+    _LIT_RED += 0 if ident else 1
+    print("  [%s] A2 白箱 LAYERS 是**真转发**（同一对象，非等值副本）"
+          % ("PASS" if ident else "FAIL"))
+
+    # 顺序承重：LAYERS 的索引序决定 _restore 插入序（rejected < unresolved < goals 尾部）
+    idx = [i for i, x in enumerate(_AUTH)]
+    tail = [x for x in _AUTH[-3:]]
+    order_ok = (tuple(tail) == ("rejected", "unresolved", "goals")
+                and tuple(_ma.LAYERS[-3:]) == tuple(tail)
+                and len(idx) == len(_ma.LAYERS))
+    _LIT_N += 1
+    _LIT_RED += 0 if order_ok else 1
+    print("  [%s] A3 顺序承重面：尾部三段序与真源一致（rejected/unresolved/goals）"
+          % ("PASS" if order_ok else "FAIL"))
+
+    try:
+        _sp = _CF.enum_spaces()["layer"]
+    except Exception as _exc:                                   # noqa: BLE001
+        _sp = {"error": "%s: %s" % (type(_exc).__name__, _exc)}
+    _sec = None if mutate == "audit" else (_sp.get("second_authority") or {})
+    audit_ok = (_sp.get("source") == "mdcg.LAYERS" and bool(_sec)
+                and _sec.get("symbol") == "md_access.LAYERS")
+    _LIT_N += 1
+    _LIT_RED += 0 if audit_ok else 1
+    print("  [%s] A4 审计知情：enum_spaces 报出曾经的第二权威现状（%s）"
+          % ("PASS" if audit_ok else "FAIL", str(_sec)[:90]))
+
+
 def main():
     ok = True
-    # 依赖自辩（2026-09-20 v14 缺陷 F）：md 语料是 gitignored 本地数据面，
-    # 缺失/空壳时**本模块自己**打 SKIP 返回 0——不再依赖外部 runner 探测
-    # （旁路执行时 runner 不在场），也不再留下未捕获异常或空壳副作用。
+    mut = ""
+    for _a in sys.argv[1:]:
+        if _a.startswith("--mutate="):
+            mut = _a.split("=", 1)[1]
+    print("== [0] 字面量判据（#122：不依赖语料根，干净检出上照判）==")
+    _literal_group(mut)
+    print("  字面量断言：%d 条，红 %d 条" % (_LIT_N, _LIT_RED))
+    if mut:
+        print("  （变异=%s：期望字面量组判红 ⇒ 判别力成立）" % mut)
+        return 1 if _LIT_RED else 0
+    # 依赖自辩（2026-09-20 v14 缺陷 F；#122 收窄）：md 语料是 gitignored 本地数据面，
+    # 缺失/空壳时**只跳过语料依赖面**（重建派生库 / 8 处 SQL 对拍 / 解析对拍），
+    # 字面量面已在上方照判 ⇒ 不再出现「零断言执行」的空 SKIP。
     _gap = corpus_gap(DEFAULT_ROOT)
     if _gap:
-        print("SKIP test_md_access_parity：%s" % _gap)
-        return 0
+        print("SKIP(语料面) test_md_access_parity：%s" % _gap)
+        print("  跳过范围＝语料依赖面；字面量面已判 %d 条（红 %d 条）"
+              % (_LIT_N, _LIT_RED))
+        return 1 if _LIT_RED else 0
     print("== [1] 重建派生库 + 建 MdConn ==")
     stats = build_db_from_md(force=True, verbose=True)
     md_conn = MdConn(DEFAULT_ROOT, layers=LAYERS)
