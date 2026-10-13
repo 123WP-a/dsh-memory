@@ -81,7 +81,7 @@ def _discovered_files():
     """
     import glob
     files = []
-    files += sorted(glob.glob(os.path.join(_REPO, "md_cg", "test_*.py")))
+    files += sorted(glob.glob(os.path.join(_REPO, "md_cg", "**", "test_*.py"), recursive=True))
     for pkg in ("compiler", "swarm"):
         for f in sorted(glob.glob(os.path.join(_REPO, pkg, "tests", "*.py"))):
             if os.path.basename(f).startswith("_"):
@@ -95,6 +95,17 @@ def _discovered_files():
     return [os.path.relpath(f, _REPO).replace("\\", "/") for f in files]
 
 
+# 生效条件：独立递归盘点 _REPO/md_cg 下所有 test_*.py（basename 以 "_" 开头者跳过；`test_` 前缀天然不以 "_" 开头），返回文件数——供 --list 打印「已发现 / 磁盘递归」差额，与 _discovered_files() 的收集面互为独立核算（issue #185）。
+def _md_cg_disk_recursive_count():
+    """磁盘上 md_cg/ 递归可见的测试文件数（独立于 _discovered_files 的核算口径）。"""
+    n = 0
+    for _dp, _dn, fs in os.walk(os.path.join(_REPO, "md_cg")):
+        for fn in fs:
+            if fn.startswith("test_") and fn.endswith(".py"):
+                n += 1
+    return n
+
+
 # 生效条件：基于 _discovered_files() 的文件列表按目录前缀分派命令形态（md_cg/ 与 hive/ 是包 -m 优先、compiler|swarm/tests/ 双候选、scripts/ 非包只直跑），返回 (组名, 显示名, argv 候选列表) 列表。
 def _discover():
     """返回 [(组名, 显示名, argv)]；argv 为候选列表（依次尝试直到成功启动）。"""
@@ -104,8 +115,12 @@ def _discover():
         parts = rel.split("/")
         stem = os.path.splitext(parts[-1])[0]
         if rel.startswith("md_cg/"):
-            out.append(("md_cg", f"md_cg.{stem}",
-                        [[sys.executable, "-X", "utf8", "-m", f"md_cg.{stem}"]]))
+            # 模块名按**仓库根相对路径**推导（issue #185）：md_cg/sub/test_x.py →
+            # md_cg.sub.test_x；顶层 md_cg/test_x.py 仍是 md_cg.test_x（逐位不变）。
+            # 子目录测试不再被压成扁平 stem——那会与兄弟撞名并静默消失。
+            _mod = "md_cg." + rel[len("md_cg/"):-3].replace("/", ".")
+            out.append(("md_cg", _mod,
+                        [[sys.executable, "-X", "utf8", "-m", _mod]]))
         elif rel.startswith(("compiler/", "swarm/")):
             pkg = parts[0]
             out.append((pkg, f"{pkg}.tests.{stem}",
@@ -279,6 +294,11 @@ def main():
         for g, n, _a in targets:
             print(f"{g:<9}{n}")
         print(f"共 {len(targets)} 个")
+        # issue #185：让「已发现数」与「磁盘递归数」的差额可见——差额即被静默
+        # 丢弃的子目录测试数（修复后恒为 0；回退非递归 glob 时立刻 >0）。
+        _md_n = sum(1 for g, _n, _a in targets if g == "md_cg")
+        print(f"已发现 {_md_n} 个 / 磁盘递归 {_md_cg_disk_recursive_count()} 个"
+              f"（md_cg test_*.py）")
         return 0
 
     # SKIP 探测：依赖缺失/平台不符的测试不执行（外部复核建议 #3，裸 clone 友好）
