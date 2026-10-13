@@ -196,32 +196,47 @@ def p8():
     ok(not hits, "P8b 盘上无越界文件（兜底真生效）", hits[:3])
 
 
-def _head_src():
+def _prepatch_src():
+    """取**引入本修复的那个提交**的父版本 evidence.py。
+
+    ★ 不能用 HEAD：本修复提交后 HEAD **就是**修复本身，"HEAD 无 _node_id_error"
+      会恒假（实测：提交后全量门禁里本守卫必红，而提交前独立跑是绿的）。
+      改为用 git log -S 定位引入提交，再看它的父提交——该断言因此**跨提交稳定**。
+    """
+    def _g(*a):
+        return subprocess.run(list(a), cwd=_REPO, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
     try:
-        src = subprocess.run(["git", "show", "HEAD:md_cg/evidence.py"],
-                             cwd=_REPO, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=60)
+        lg = _g("git", "log", "-S_node_id_error", "--format=%H", "--",
+                "md_cg/evidence.py")
     except Exception as exc:                                  # noqa: BLE001
         return None, "git 调用失败：%r" % (exc,)
+    if lg.returncode != 0:
+        return None, "git log rc=%s" % lg.returncode
+    shas = [x.strip() for x in (lg.stdout or "").splitlines() if x.strip()]
+    if not shas:
+        return None, "git log -S 未找到引入提交（历史过浅？）"
+    intro = shas[-1]                      # 最早那次引入
+    src = _g("git", "show", intro + "^:md_cg/evidence.py")
     if src.returncode != 0:
-        return None, "git show rc=%s" % src.returncode
+        return None, "git show %s^ rc=%s（根提交？）" % (intro[:8], src.returncode)
     return src.stdout, ""
 
 
 def p9():
     print("== P9 缺陷曾真实存在（核对修复前源码原形）==")
-    t, err = _head_src()
+    t, err = _prepatch_src()
     if t is None:
-        ok(False, "P9 取旧源失败：%s" % err)
+        ok(False, "P9 取修复前源失败：%s" % err)
         return
     ok("_node_id_error" not in t,
-       "P9a HEAD（修复前）无 _node_id_error —— 判据由本修复引入")
-    ok("(explicit or os.environ.get(NODE_ID_ENV) or \"\").strip()" in t,
-       "P9b HEAD 的 node_id() 确为「只 strip、零校验」原形")
+       "P9a 引入提交的**父版本**无 _node_id_error —— 判据由本修复引入")
+    ok("explicit or os.environ.get(NODE_ID_ENV)" in t,
+       "P9b 修复前的 node_id() 确为「只 strip、零校验」原形")
     ok("c[\"node_id\"] + \".json\"" in t,
-       "P9c HEAD 的 publish_card 确为「直接拼路径」原形")
+       "P9c 修复前的 publish_card 确为「直接拼路径」原形")
     ok("os.path.realpath(p)" not in t,
-       "P9d HEAD 无 realpath 包含性判定 —— 越界无第二道防线")
+       "P9d 修复前无 realpath 包含性判定 —— 越界无第二道防线")
 
 
 def p9b():
