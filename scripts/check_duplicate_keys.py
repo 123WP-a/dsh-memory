@@ -20,6 +20,11 @@ r"""重复键守卫（issue #118 / #119）：同键两次取值不同 ⇒ 非零
   · 键本身非字面量（变量/属性/\`**\` 展开）⇒ 不判（不猜测）
   · MIXED 同键下既有字面量又有表达式取值 ⇒ 按 UNEVALUABLE 列出并告警
 
+判据面（issue #177）：R1 = 真实仓 DIFF_VALUE 归零（判据语义与输出文案逐位不变）；
+R2 = 全仓可解析性（无 PARSE_ERROR）——两者都在 **git 追踪面**上判：未追踪件（本机临时
+探针 / 被 gitignore 的本地产物）不入判据面；git 不可用时**显式**退化为文件系统面并在
+输出里标注（绝不静默切换）。未追踪件的可解析性单列一节观察，**不计入 FAIL**。
+
 用法：
     python -X utf8 scripts/check_duplicate_keys.py            # 人类可读
     python -X utf8 scripts/check_duplicate_keys.py --json     # 机器可读
@@ -33,12 +38,13 @@ import ast
 import io
 import json
 import os
+import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
 
-#: 不看的面：版本控制/缓存/构建产物/临时工作区（判据面=源码，不含副本与产物）
+#: 不看的面（**只用于 git 不可用时的显式退化面**；主判据面 = git 追踪面，见 scan_repo）
 SKIP_DIRS = frozenset({
     ".git", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache",
     ".ruff_cache", "target", ".tmp", "dist", "build", ".venv", "venv",
@@ -117,16 +123,96 @@ def scan_file(path: str, root: str) -> list:
     return scan_source(src, rel)
 
 
-# 生效条件：root 为目录；返回 (扫描文件数, 条目列表)——遍历跳过 SKIP_DIRS，只收 .py。
+#: 判据面（issue #177）：`git` = git 追踪面（真源）；`fs` = git 不可用时的**显式**退化面
+SCAN_FACE_GIT, SCAN_FACE_FS = "git", "fs"
+SCAN_FACE = SCAN_FACE_GIT
+SCAN_FACE_REASON = ""
+
+
+# 生效条件：root 为目录；返回该基座下 git 追踪面里的 .py 路径（posix 分隔、升序）。调用体例照
+# scripts/workspace_index.py::tracked（NUL 分隔取原始路径，规避 core.quotepath 转义）；
+# git 未安装 / 非 git 目录 / 返回非 0 ⇒ 返回 None（调用方**显式**降级，绝不静默切换）。
+def tracked_py(root: str):
+    try:
+        p = subprocess.run(["git", "ls-files", "-z"], cwd=root, shell=False,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace",
+                           env={**os.environ, "PYTHONUTF8": "1"})
+    except OSError:                                          # git 未安装
+        return None
+    if p.returncode != 0:                                    # 非 git 目录 / 仓库不可用
+        return None
+    return sorted(x for x in (p.stdout or "").split("\0") if x.endswith(".py"))
+
+
+# 生效条件：恒返回当前扫描面的一行标注；git 不可用时显式点名退化面，**不得静默切换**。
+def scan_face_note() -> str:
+    if SCAN_FACE == SCAN_FACE_GIT:
+        return "[扫描面] git 追踪面（git ls-files）"
+    return "[扫描面] 文件系统（git 不可用）" + (
+        "；原因：%s" % SCAN_FACE_REASON if SCAN_FACE_REASON else "")
+
+
+# 生效条件：root 为目录；返回 (扫描文件数, 条目列表)——返回形状与旧版逐位一致。R2 判据面 =
+# **git 追踪面**（issue #177）：未追踪件（本机临时探针 / 被 gitignore 的本地产物）不入判据
+# 面——否则「本地恒红（R2）/ CI 绿」分裂会让守卫被忽视，反噬核心判据 R1（真实仓 DIFF=0）。
+# git 不可用时**显式**退化到 os.walk 并置 SCAN_FACE=fs（标注见 scan_face_note()）；skip_dirs
+# 只作用于退化面（追踪面天然不含 gitignore 面）。
 def scan_repo(root: str, skip_dirs=SKIP_DIRS) -> tuple:
+    global SCAN_FACE, SCAN_FACE_REASON
+    rels = tracked_py(root)
     rows, n = [], 0
-    for dp, dn, fns in os.walk(root):
-        dn[:] = [d for d in dn if d not in skip_dirs]
-        for f in sorted(fns):
-            if f.endswith(".py"):
-                n += 1
-                rows.extend(scan_file(os.path.join(dp, f), root))
+    if rels is None:
+        SCAN_FACE, SCAN_FACE_REASON = SCAN_FACE_FS, "git ls-files 不可用"
+        for dp, dn, fns in os.walk(root):
+            dn[:] = [d for d in dn if d not in skip_dirs]
+            for f in sorted(fns):
+                if f.endswith(".py"):
+                    n += 1
+                    rows.extend(scan_file(os.path.join(dp, f), root))
+        return n, rows
+    SCAN_FACE, SCAN_FACE_REASON = SCAN_FACE_GIT, ""
+    for rel in rels:
+        n += 1
+        rows.extend(scan_file(os.path.join(root, rel.replace("/", os.sep)), root))
     return n, rows
+
+
+# 生效条件：root 为目录；返回 R2 判据读数 {"face","files","tracked","ok"}——扫描面必须是 git
+# 追踪面（未追踪件不得入判据面）；git 不可用时 ok=True（退化面已显式标注）；恒不抛。
+def scan_face_verdict(root: str) -> dict:
+    rels = tracked_py(root)
+    n, _rows = scan_repo(root)
+    if rels is None:
+        return {"face": SCAN_FACE_FS, "files": n, "tracked": None, "ok": True}
+    return {"face": SCAN_FACE_GIT, "files": n, "tracked": len(rels),
+            "ok": bool(SCAN_FACE == SCAN_FACE_GIT and n == len(rels))}
+
+
+# 生效条件：root 为目录；返回 [(未追踪 .py 相对路径, 不可解析原因)]——**单列一节报告**：只观察
+# 「未追踪件的可解析性」，不进判据面、**不计入 FAIL**（报告方建议 2；issue #177）。git 不可用
+# 时返回 []。恒不抛。
+def untracked_py_observations(root: str) -> list:
+    rels = tracked_py(root)
+    if rels is None:
+        return []
+    seen, out = set(rels), []
+    for dp, dn, fns in os.walk(root):
+        dn[:] = [d for d in dn if d not in SKIP_DIRS]
+        for f in sorted(fns):
+            if not f.endswith(".py"):
+                continue
+            full = os.path.join(dp, f)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            if rel in seen:
+                continue
+            try:
+                ast.parse(io.open(full, encoding="utf-8").read())
+            except SyntaxError as exc:
+                out.append((rel, "解析失败：%s" % exc))
+            except (OSError, UnicodeDecodeError) as exc:
+                out.append((rel, "读取失败：%s" % exc))
+    return sorted(out)
 
 
 # 生效条件：rows 为 scan_* 的条目列表；按 kind 计数返回 dict（键恒含三分类，缺项为 0）。
@@ -159,7 +245,8 @@ def main(argv=None) -> int:
     got = summarize(rows)
     diffs = [r for r in rows if r["kind"] == DIFF]
     if a.json:
-        print(json.dumps({"root": a.root, "files": n, "counts": got,
+        print(json.dumps({"root": a.root, "files": n,
+                          "scan_face": scan_face_note(), "counts": got,
                           "diff_value": diffs,
                           "same_value": [r for r in rows if r["kind"] == SAME],
                           "unevaluable": [r for r in rows
@@ -169,6 +256,7 @@ def main(argv=None) -> int:
                          ensure_ascii=False, indent=1))
     else:
         print("=== 重复键守卫（issue #118/#119）===")
+        print(scan_face_note())
         print("对象 root=%s；扫描 .py = %d" % (a.root, n))
         print("分类：" + json.dumps(got, ensure_ascii=False))
         if diffs:
@@ -185,6 +273,12 @@ def main(argv=None) -> int:
         for r in rows:
             if r["kind"] == "PARSE_ERROR":
                 print("[note] 解析失败：%s：%s" % (r["file"], r.get("error")))
+        obs = untracked_py_observations(a.root)
+        print("")
+        print("[观察] 未追踪 .py 的可解析性（单列一节：不进判据面、不阻断、不计入 FAIL）：%d 件"
+              % len(obs))
+        for _rel, _why in obs:
+            print("   - %s：%s" % (_rel, _why))
         print("VERDICT=%s" % ("FAIL" if diffs else "PASS"))
     return 1 if diffs else 0
 
