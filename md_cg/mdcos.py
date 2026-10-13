@@ -64,6 +64,9 @@ _FIX_RE = re.compile(
     re.I | re.M)
 
 RRF_K = 60          # RRF 常数
+# 每路能贡献多少候选（融合循环里的 `[:cap]` 截断）——**单一真源**（issue #139 R-2）：
+# `md_cg.bm25.LIMIT` 与 search_rrf 的融合 / 仅召回两处切片都引用本常量。
+RRF_PATH_TERM_CAP = 50
 
 # ---- issue #130：实体路（`_path_entity`）的**有判别力**打分 -------------------
 # 缺陷现场：原实现命中即 `out.append((node, 1.0))`——全路同分，其"排序"只由
@@ -1977,7 +1980,7 @@ class MdCGOS(MdCG):
                 ro.add(name)
                 continue
             w = float((path_weights or {}).get(name, 1.0))
-            for rank, (node, _s) in enumerate(scored[:50], 1):
+            for rank, (node, _s) in enumerate(scored[:RRF_PATH_TERM_CAP], 1):
                 nid = node["id"]
                 contrib = w / (RRF_K + rank)
                 if fusion == "max":
@@ -1990,7 +1993,7 @@ class MdCGOS(MdCG):
                     entry["conditions"] = chain_prov[nid]["conditions"]
                 prov.setdefault(nid, []).append(entry)
         for name in ro:                     # 仅召回：补候选，不改排序
-            for rank, (node, _s) in enumerate((ranked.get(name) or [])[:50], 1):
+            for rank, (node, _s) in enumerate((ranked.get(name) or [])[:RRF_PATH_TERM_CAP], 1):
                 nid = node["id"]
                 if nid in rrf:
                     continue
@@ -2122,6 +2125,16 @@ class MdCGOS(MdCG):
         _path_fp = build_path_fingerprint(selection=_fp_selection,
                                           recursion=_fp_recursion,
                                           paths=_fp_paths)
+        # issue #139 R-2 审计（**只增不改**，先例 path_fingerprint）：把「每路能贡献
+        # 多少候选」的单一真源显式报账——candidates=本路产出候选总数（与 meta.paths
+        # 同源）、used=实际进入融合的名额（= min(candidates, RRF_PATH_TERM_CAP)，即融合
+        # / 仅召回两处切片的长度）、dropped=被 cap 挡在融合之外的候选数。纯聚合读数：
+        # 不改任何既有键，也不改 meta.paths 的值类型（仍是 int）。
+        path_truncation = {
+            name: {"candidates": int(n),
+                   "used": int(min(n, RRF_PATH_TERM_CAP)),
+                   "dropped": int(max(0, n - RRF_PATH_TERM_CAP))}
+            for name, n in per_path.items()}
         if record and results:
             self.record_access([r[0]["id"] for r in results], "RRF")
         # 热路径：写 query 结果缓存 —— **同样受 `_time_on` 约束**。
@@ -2138,6 +2151,7 @@ class MdCGOS(MdCG):
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,
+                         "path_truncation": path_truncation,
                          "path_fingerprint": _path_fp, **_tf_meta,
                          **_gates_meta, **_bnd_meta, **_index_meta}, k=k, layer=layer,
                          session=session, branch=branch, validity=validity,
@@ -2151,6 +2165,7 @@ class MdCGOS(MdCG):
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,
+                         "path_truncation": path_truncation,
                          "path_fingerprint": _path_fp, **_tf_meta,
                          **_gates_meta, **_bnd_meta, **_index_meta}
 

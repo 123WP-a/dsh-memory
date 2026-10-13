@@ -20,7 +20,15 @@ import time
 # Fixed before benchmark test evaluation. Positive IDF and conventional defaults
 # follow Lucene BM25Similarity; this is not a Lucene analyzer/codec replica.
 K1, B = 1.2, 0.75
-LIMIT = 50
+# `LIMIT` 的**单一真源** = `md_cg.mdcos.RRF_PATH_TERM_CAP`（issue #139 R-2）：
+# BM25 路的返回上限与 search_rrf 融合 / 仅召回两处切片同源。mdcos 只在函数内
+# 惰性 `from . import bm25`，故此处反向取值不成环；极端导入次序（mdcos 尚在
+# 初始化 / 本模块被当顶层模块导入）下回落**同一字面量** 50，行为逐位不变。
+try:
+    from .mdcos import RRF_PATH_TERM_CAP as LIMIT
+except Exception:                      # pragma: no cover - 仅极端导入次序触发
+    LIMIT = 50
+
 BLOCK_SIZE = 128
 BLOCK_THRESHOLD = 4096
 BLOCK_CACHE_TERMS = 32
