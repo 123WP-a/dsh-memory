@@ -1399,6 +1399,8 @@ def induce_memories(cg_or_root, source_layer="contextual", target_layer="knowled
     流程：读取源层 → bigram 相似度贪心聚类 → 提炼共同条件 → 生成概念节点
     （apply=True）→ 写 `generalizes` / `instance_of` 对称 inferred 边 → 写留痕。
 
+    issue #164：概念节点密级 = 成员最高档；任一成员密级判不了则 fail-closed
+    不生成（只留 `_maintain.jsonl` 的 sensitivity_not_judgeable 留痕）。
     apply=False（默认）只出候选报表（可预演）；apply=True 才写盘（可留痕、可回溯）。
     幂等：概念 id 由成员清单派生，同成员重复归纳不新增节点。
     """
@@ -1423,9 +1425,18 @@ def induce_memories(cg_or_root, source_layer="contextual", target_layer="knowled
     truncated = len(pool) > int(max_nodes)
     pool = pool[:int(max_nodes)]
 
+    skipped_sensitivity = 0
     cache = {}
     for nid in pool:
         got = subgraph._node_terms_and_grams(cg, nid)
+        if got and got.get("unjudgeable"):
+            skipped_sensitivity += 1
+            if apply:
+                append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                    "t": time.time(), "action": "induce", "batch": None,
+                    "members": [nid], "reason": "sensitivity_not_judgeable",
+                    "actor": actor})
+            continue
         if got and got["grams"]:
             cache[nid] = got
     keys = sorted(cache.keys())
@@ -1437,6 +1448,7 @@ def induce_memories(cg_or_root, source_layer="contextual", target_layer="knowled
            "min_jaccard": float(min_jaccard),
            "require_conditions": bool(require_conditions),
            "skipped_small": 0, "skipped_no_condition": 0, "skipped_existing": 0,
+           "skipped_sensitivity": skipped_sensitivity,
            "clusters": 0, "written": 0, "concepts": [], "samples": [],
            "log": MAINTAIN_LOG}
 
@@ -1461,6 +1473,7 @@ def induce_memories(cg_or_root, source_layer="contextual", target_layer="knowled
         proposals.append({
             "members": members, "concept_id": _concept_id(members),
             "common_conditions": common_pos, "non_applicable": neg_union,
+            "sensitivity": subgraph.derive_sensitivity(cg, members),
             "reason": ("%d 条记忆内容相近且共享条件「%s」→ 归纳为概念"
                        % (len(members), "、".join(common_pos) or "无")),
         })
@@ -1483,22 +1496,46 @@ def induce_memories(cg_or_root, source_layer="contextual", target_layer="knowled
         if cid in nodes:
             rep["skipped_existing"] += 1
             continue
+        sens = p.get("sensitivity")
+        if sens is None:
+            rep["skipped_sensitivity"] += 1
+            append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                "t": time.time(), "action": "induce", "batch": batch,
+                "concept": cid, "members": list(p["members"]),
+                "common_conditions": p["common_conditions"],
+                "reason": "sensitivity_not_judgeable", "actor": actor})
+            continue
         content = _concept_payload(p["members"], p["common_conditions"],
                                    p["non_applicable"])
         _consolidated_at = time.time()   # 概念形成时刻 = 巩固时刻（单一取值，禁两处取时）
         cg.add(cid, content, layer=target_layer, tags=list(CONCEPT_TAGS),
                importance=CONCEPT_IMPORTANCE, verification_basis="other",
+               sensitivity=sens,
                induced_from=list(p["members"]), induced_at=_consolidated_at,
                consolidated_at=_consolidated_at,
                induction={"method": "bigram_jaccard", "min_jaccard": float(min_jaccard),
                           "common_conditions": p["common_conditions"], "batch": batch,
                           "actor": actor, "evidence": "inferred"},
                actor=actor)
-        _link_concept(cg, cid, p["members"], p["reason"], actor, batch)
-        append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
-            "t": time.time(), "action": "induce", "batch": batch, "concept": cid,
-            "members": list(p["members"]), "common_conditions": p["common_conditions"],
-            "source_layer": source_layer, "target_layer": target_layer, "actor": actor})
+        from . import security as _sec
+        try:
+            _high = _sec._rank(str(sens)) > _sec._rank(_sec.DEFAULT_SENSITIVITY)
+        except Exception:
+            _high = False
+        _link_reason = ("%d 条记忆内容相近 → 归纳为概念（条件词按密级留白）"
+                        % len(p["members"])) if _high else p["reason"]
+        _link_concept(cg, cid, p["members"], _link_reason, actor, batch)
+        if _high:
+            append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                "t": time.time(), "action": "induce", "batch": batch, "concept": cid,
+                "members": list(p["members"]), "common_conditions": [],
+                "condition_terms_withheld": True,
+                "source_layer": source_layer, "target_layer": target_layer, "actor": actor})
+        else:
+            append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                "t": time.time(), "action": "induce", "batch": batch, "concept": cid,
+                "members": list(p["members"]), "common_conditions": p["common_conditions"],
+                "source_layer": source_layer, "target_layer": target_layer, "actor": actor})
         rep["concepts"].append(cid)
         rep["written"] += 1
     if rep["written"]:

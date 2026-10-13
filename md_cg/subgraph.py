@@ -333,19 +333,75 @@ def validate(cg, limit=50, max_scan=None):
 #   · 边携带 reason + 判定分量，供后续重构/审计追溯；
 #   · 条件**相同**的相似对**不是**分离候选（那是重复，该走 MERGE）。
 
-# 生效条件：cg.get(nid) 为假值（None/{}）时返回 None；否则取 fm=node.get("frontmatter") or {}、content=node.get("content") or ""，返回 {'grams': bigrams(forgetting.payload(content)), 'pos','neg': consistency.condition_terms(fm, content) 的结果, 'layer': fm.get("layer")}——grams 为空也照常返回该字典，不返回 None；
+# issue #164：派生节点（概念归纳 / 情景重构）必须带密级，密级 = 来源锚点最高档；
+# 判不了（缺 / 非法）fail-closed 不生成。加密档（crypto.ENCRYPTED_LEVELS）只抄
+# id 不抄条件词——判据读 frontmatter 明文，不依赖 cg.get 是否已解密。
+def _sensitivity_of(fm):
+    """从 frontmatter 读合法密级；缺/非法返回 None（不猜测）。"""
+    from . import security as _sec
+    s = (fm or {}).get("sensitivity")
+    if s is None:
+        return None
+    try:
+        _sec._rank(str(s))
+        return str(s)
+    except Exception:
+        return None
+
+
+def node_sensitivity(cg, nid):
+    """读节点密级：优先索引快照（元数据明文），回退读文件；判不了返回 None。"""
+    e = ((getattr(cg, "index", None) or {}).get("nodes") or {}).get(nid)
+    if e is not None and e.get("sensitivity") is not None:
+        return _sensitivity_of(e)
+    node = cg.get(nid)
+    if not node:
+        return None
+    return _sensitivity_of(node.get("frontmatter") or {})
+
+
+def derive_sensitivity(cg, nids):
+    """派生节点密级 = 来源锚点最高档；任一来源判不了 → None（fail-closed）。"""
+    from . import security as _sec
+    best = None
+    for nid in nids:
+        s = node_sensitivity(cg, nid)
+        if s is None:
+            return None
+        if best is None or _sec._rank(s) > _sec._rank(best):
+            best = s
+    return best
+
+
+# 生效条件：cg.get(nid) 为假值（None/{}）时返回 None；否则取 fm=node.get("frontmatter") or {}、content=node.get("content") or ""，返回 {'grams': bigrams(forgetting.payload(content)), 'pos','neg': consistency.condition_terms(fm, content) 的结果, 'layer': fm.get("layer"), 'sensitivity': _sensitivity_of(fm)}；加密档返回 grams/pos/neg 为空集、encrypted=True，不抄条件词；
 def _node_terms_and_grams(cg, nid):
     """读取节点并返回 (payload 二元组, 正条件词面, 负条件词面)；不可读返回 None。"""
-    from . import consistency, forgetting
+    from . import consistency, forgetting, crypto
     from .mdcg import bigrams          # 惰性导入：避开 mdcg↔subgraph 循环
+    e = ((getattr(cg, "index", None) or {}).get("nodes") or {}).get(nid)
+    if e is not None and e.get("sensitivity") is not None:
+        sens = _sensitivity_of(e)
+        if sens is None:
+            return {"grams": set(), "pos": set(), "neg": set(),
+                    "layer": e.get("layer"), "sensitivity": None,
+                    "unjudgeable": True}
+        if sens in crypto.ENCRYPTED_LEVELS:
+            return {"grams": set(), "pos": set(), "neg": set(),
+                    "layer": e.get("layer"), "sensitivity": sens,
+                    "encrypted": True}
     node = cg.get(nid)
     if not node:
         return None
     fm = node.get("frontmatter") or {}
     content = node.get("content") or ""
+    sens = _sensitivity_of(fm)
+    if sens in crypto.ENCRYPTED_LEVELS:
+        return {"grams": set(), "pos": set(), "neg": set(),
+                "layer": fm.get("layer"), "sensitivity": sens, "encrypted": True}
     grams = bigrams(forgetting.payload(content))
     pos, neg = consistency.condition_terms(fm, content)
-    return {"grams": grams, "pos": pos, "neg": neg, "layer": fm.get("layer")}
+    return {"grams": grams, "pos": pos, "neg": neg, "layer": fm.get("layer"),
+            "sensitivity": sens}
 
 
 # 生效条件：pool 初取 cg.index 的 nodes 键，layer 为假值（None/""）时不按层过滤、否则只留 e.get("layer")==layer 的 nid，ids 为真值时只留 str(x) 属于该集合的 nid；pool 排序后 truncated=len(pool)>int(max_nodes)、并截为前 int(max_nodes) 个；只有 _node_terms_and_grams 返回非 None 且 grams 非空的节点进 cache；对 cache 键两两比较——无公共 bigram 跳过、jaccard 小于 float(min_jaccard) 跳过、condition_distinct 的 distinct 为假或 overlap > float(max_cond_overlap) 跳过，其余成候选并按 (-jaccard,a,b) 排序；返回 scanned、compared、candidates=out[:int(limit)]、total_candidates、truncated、note；
@@ -577,12 +633,17 @@ def _anchor_scores(cg, pool, clue_terms):
     return scored
 
 
-# 生效条件：对 anchor_ids 中每个 nid，cg.get(nid) 为假值跳过，否则取 fm 与 consistency.condition_terms 得 pos/neg，per[nid] 记为 {"effective": sorted(pos)[:8], "non_applicable": sorted(neg)[:8]}；返回 common=_shared_terms(pos_sets)、individual=_uniq_terms(pos_sets) 中不在 common 的项、non_applicable=_uniq_terms(neg_sets)、declared=list(declared_terms or [])、per_anchor=per；
+# 生效条件：对 anchor_ids 中每个 nid 合成条件空间——加密档锚点不读正文条件词（per 记空集、不进 pos_sets/neg_sets），其余取 fm 与 consistency.condition_terms 得 pos/neg，per[nid] 记为 {"effective": sorted(pos)[:8], "non_applicable": sorted(neg)[:8]}；返回 common=_shared_terms(pos_sets)、individual=_uniq_terms(pos_sets) 中不在 common 的项、non_applicable=_uniq_terms(neg_sets)、declared=list(declared_terms or [])、per_anchor=per、sensitivity=derive_sensitivity(cg, anchor_ids)；
 def _condition_space(cg, anchor_ids, declared_terms=None):
     """合成锚点群的条件空间：共同条件 / 个别条件 / 不适用条件 / 逐锚点明细。"""
-    from . import consistency
+    from . import consistency, crypto
     pos_sets, neg_sets, per = [], [], {}
     for nid in anchor_ids:
+        e = ((getattr(cg, "index", None) or {}).get("nodes") or {}).get(nid) or {}
+        sens = _sensitivity_of(e)
+        if sens in crypto.ENCRYPTED_LEVELS:
+            per[nid] = {"effective": [], "non_applicable": []}
+            continue
         node = cg.get(nid)
         if not node:
             continue
@@ -595,7 +656,8 @@ def _condition_space(cg, anchor_ids, declared_terms=None):
     individual = [t for t in _uniq_terms(pos_sets) if t not in common]
     return {"common": common, "individual": individual,
             "non_applicable": _uniq_terms(neg_sets),
-            "declared": list(declared_terms or []), "per_anchor": per}
+            "declared": list(declared_terms or []), "per_anchor": per,
+            "sensitivity": derive_sensitivity(cg, anchor_ids)}
 
 
 # 生效条件：以 cg.index["nodes"] 为节点池（layer 为真时只保留 layer 等于该值的节点，池按 max_nodes 截断），由 clues 词项与 ids 收集锚点并截取 limit 个，锚点为空则返回 status="blindspot" 且 condition_space=None，否则返回 status="reconstructed"（neighbors 为真时按链邻接补边并在 max_nodes 内补节点，apply 为真且算出的 scene_id 尚不在 nodes 中时再写入该情境节点并记日志）；
@@ -701,7 +763,13 @@ def reconstruct_scene(cg, clues=None, ids=None, conditions=None, layer=None,
         sid = RECON_SCENE_PREFIX + hashlib.sha1(
             "|".join(sorted(node_ids)).encode("utf-8")).hexdigest()[:10]
         written = False
-        if sid not in nodes:
+        sens = cs.get("sensitivity")
+        if sens is None:
+            append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                "t": time.time(), "action": "reconstruct", "scene": None,
+                "anchors": list(anchor_ids), "clues": clue_terms,
+                "reason": "sensitivity_not_judgeable", "actor": actor})
+        elif sid not in nodes:
             common_txt = "；".join(cs["common"][:6]) or "（未提炼出共同条件）"
             neg_txt = "；".join(cs["non_applicable"][:6]) or "（未判定）"
             body = (
@@ -715,13 +783,26 @@ def reconstruct_scene(cg, clues=None, ids=None, conditions=None, layer=None,
                    "、".join(anchor_ids), neg_txt))
             cg.add(sid, body, layer="contextual",
                    tags=["scene", "reconstructed"], importance=0.4,
-                   verification_basis="other", reconstructed_from=list(anchor_ids),
+                   verification_basis="other", sensitivity=sens,
+                   reconstructed_from=list(anchor_ids),
                    clues=list(clue_terms), confidence=confidence,
                    actor=actor)
-            append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
-                "t": time.time(), "action": "reconstruct", "scene": sid,
-                "anchors": list(anchor_ids), "clues": clue_terms,
-                "common": cs["common"], "confidence": confidence, "actor": actor})
+            try:
+                from . import security as _sec
+                _high = _sec._rank(str(sens)) > _sec._rank(_sec.DEFAULT_SENSITIVITY)
+            except Exception:
+                _high = False
+            if _high:
+                append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                    "t": time.time(), "action": "reconstruct", "scene": sid,
+                    "anchors": list(anchor_ids), "clues": clue_terms,
+                    "common": [], "condition_terms_withheld": True,
+                    "confidence": confidence, "actor": actor})
+            else:
+                append_jsonl(os.path.join(cg.root, MAINTAIN_LOG), {
+                    "t": time.time(), "action": "reconstruct", "scene": sid,
+                    "anchors": list(anchor_ids), "clues": clue_terms,
+                    "common": cs["common"], "confidence": confidence, "actor": actor})
             invalidate_cache(cg)
             written = True
         out["scene_id"] = sid
