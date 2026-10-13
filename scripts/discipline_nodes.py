@@ -54,7 +54,26 @@ TAG_PREFIX = "discipline:"
 BAD_ROOT_PREFIX = "_md_cg_"
 DEFAULT_CARRIER = "本机三 harness（codebuddy / zcode / dsh）的会话上下文与灵枢认知图"
 
-_LINE_NAMES = ("功能名", "生效条件", "子功能", "执行", "验证方式", "不适用条件")
+# 真源单点（issue #183）：六要素名一律引用 md_cg.nodefile.CCG_MARKS，
+# 本文件**不再**复制第二份字面量（禁「各自再定义一份」）。
+# 形态 = 模块级惰性属性（PEP 562）：`discipline_nodes._LINE_NAMES` 的既有读取面逐位不变，
+# 而 md_cg 的导入成本只在**首次取用**时支付（照 library_layers() 的惰性体例）。
+def line_names():
+    """六要素名（真源引用）：把仓根补进 sys.path 后返回 md_cg.nodefile.CCG_MARKS 的元组副本。"""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    from md_cg.nodefile import CCG_MARKS  # noqa: PLC0415 —— 惰性：仅首次取用才付导入成本
+    return tuple(CCG_MARKS)
+
+
+def __getattr__(name):
+    """PEP 562 模块级惰性属性：`_LINE_NAMES` 取用时才导入真源；其余名字照常 AttributeError。"""
+    if name == "_LINE_NAMES":
+        return line_names()
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
+
+
 _CARRIER_RE = re.compile(r"载体/位置：(.*?)；时间：(.*?)；方法：", re.S)
 
 

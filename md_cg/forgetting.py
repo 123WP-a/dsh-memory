@@ -109,10 +109,11 @@ def _coverage(new_grams, body_grams):
     return len(new_grams & body_grams) / float(len(new_grams))
 
 
-# CCG 五要素的固定标签：所有节点都一样，属**模板骨架而非内容**。
+# CCG 六要素的固定标签：所有节点都一样，属**模板骨架而非内容**。
 # 不剥离它们，任何两条记忆都会因共享 `# 功能名：`/`# 生效条件：` 而虚高重复度
 # （实测：两条毫不相关的记忆 dup≈0.33，全部来自模板）。故重复检测只看"值"。
-_TEMPLATE_LABELS = ("功能名", "生效条件", "子功能", "执行", "验证方式", "不适用条件")
+# 标签集合同源于 nodefile.CCG_MARKS（真源单点，issue #183）——勿再复制第二份字面量。
+_TEMPLATE_LABELS = tuple(nodefile.CCG_MARKS)
 
 
 # 生效条件：content 为 None 或假值时按 "" 处理，结果为空串；否则逐行剥离 "#" 与 _TEMPLATE_LABELS 标签后以 "" 直接拼接。
