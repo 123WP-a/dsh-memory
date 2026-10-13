@@ -359,7 +359,59 @@ def l4():
             = rot, keep, probe
 
 
-_GROUPS = (g0, l1, l2, l3, l4)
+
+
+def l5():
+    """L5 心跳的**调度源唯一**（issue #207 T1）。
+
+    开启独立心跳线程（MDCG_SUSTAIN_BEAT_THREAD）后，beat 的调度源应当**转移**
+    到该线程，而不是在 _run 与线程上**各调度一次**——叠加会让心跳与台账行数
+    按倍率翻倍，并使 status()["beats"] 这一对外读数失真。
+
+    判据是**行为**的（真跑循环数台账行），不是源码文本：同一窗口下开关开/关的
+    台账 beat 行数必须同量级；若开关开时近乎翻倍，即叠加。
+    """
+    print("== L5 心跳调度源唯一（开关开 => 转移，不叠加）==")
+    S = globals()["sustain"]
+    import time as _t
+
+    def _count(on, interval=0.25, window=2.5):
+        os.environ["MDCG_SUSTAIN_BEAT_THREAD"] = "1" if on else "0"
+        root, netdir = _fresh_root("l5"), _netdir("l5")
+        from .mdcos import MdCGOS
+        cg = MdCGOS(root)
+        lp = S.SustainLoop(cg, name="h5", d=netdir, beat_interval=interval,
+                           heal_interval=1e9, scrub_interval=1e9,
+                           evolve_interval=1e9, tidy_interval=1e9,
+                           sleep_interval=1e9, auto_heal=False,
+                           auto_scrub=False, auto_evolve=False,
+                           auto_tidy=False)
+        lp.start()
+        _t.sleep(window)
+        lp.stop(1.0)
+        hp = S.heartbeat_path(root)
+        n = 0
+        if os.path.exists(hp):
+            for line in open(hp, encoding="utf-8", errors="replace"):
+                if chr(34) + "beat" + chr(34) in line:
+                    n += 1
+        return n
+
+    try:
+        off = _count(False)
+        on = _count(True)
+    finally:
+        os.environ.pop("MDCG_SUSTAIN_BEAT_THREAD", None)
+    ok(off >= 4,
+       "L5a 前置：关态窗口内确有 beat 行（否则比较空转）实际 %d" % off, off)
+    ok(on <= off * 1.6,
+       "L5b 开态**不叠加**：开=%d 关=%d（倍率 %.2fx，>1.6x 即两路各调度一次）"
+       % (on, off, (on / off) if off else 0), (on, off))
+    ok(on >= off * 0.6,
+       "L5c 开态心跳**仍在推进**（未被误关掉）：开=%d 关=%d" % (on, off),
+       (on, off))
+
+_GROUPS = (g0, l1, l2, l3, l4, l5)
 
 
 # ---------------------------------------------------------------- 变异表
@@ -389,6 +441,11 @@ _MUTATIONS = (
      "        append_jsonl(os.path.join(root, SUSTAIN_LOG),"
      ' {"t": row["t"], "op": "hb_probe"})\n',
      1, "L1"),
+    ("M6 beat 调度源叠加（开关开时 _run 仍自行调度）", "mod",
+     "md_cg/sustain.py",
+     "            if own_beat and now >= next_beat:",
+     "            if now >= next_beat:",
+     1, "L5"),
 )
 
 

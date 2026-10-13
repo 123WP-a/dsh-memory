@@ -1580,6 +1580,14 @@ class SustainLoop:
 # 生效条件：self._stop 未置位期间轮询（**先调 _wrap_ticks 给六档包上进度面，幂等**），按 beat_interval/heal_interval/scrub_interval/evolve_interval/tidy_interval/**sleep_interval（第六档）** 到期分别执行 beat 与 _tick_heal/_tick_scrub/_tick_evolve/_tick_tidy/_tick_sleep（六档调用形态与既有五档逐字同构：try/except 吞异常 + `_stop.wait(_POLL)` 收尾；进/出读数与异常记录由包装单点提供——issue #63）；
     def _run(self):
         self._wrap_ticks()               # issue #63：六档包上进度面（幂等，形态不变）
+        # issue #207 T1（2026-10-13 DSH 端）：beat 的**调度源**在开启独立心跳线程后
+        # 应当**转移**而不是**叠加**。原实现下 start() 起了 _beat_loop 线程，
+        # 而本循环仍在按 beat_interval 调 beat() —— 两路叠加，心跳与台账行数按
+        # 倍率翻倍（实测 OFF=30 / ON=59 @0.2s），且 status()["beats"] 这一对外
+        # 读数随之失真（uptime/beats 被外部用来推「转过多少轮」）。
+        # 本函数自己的 docstring 写的就是「唯一改动的是 beat 的**调度源**」——
+        # 是转移语义。缺省关时本标志恒为 True，既有单线程基线逐位不变。
+        own_beat = not beat_thread_enabled()
         next_beat = time.time() + self.beat_interval
         next_heal = time.time() + self.heal_interval
         next_scrub = time.time() + self.scrub_interval
@@ -1588,7 +1596,7 @@ class SustainLoop:
         next_sleep = time.time() + self.sleep_interval
         while not self._stop.is_set():
             now = time.time()
-            if now >= next_beat:
+            if own_beat and now >= next_beat:
                 try:
                     self.beat()
                 except Exception:
