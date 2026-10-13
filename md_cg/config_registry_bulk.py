@@ -358,6 +358,7 @@ ENV_CATEGORY_ROWS = [
     ('MDCG_NODE_ID', 'env', 'dsh-memory-main', '字符串', '证据写入的节点 id 覆盖（md_cg/evidence.py:94,470）'),
     ('MDCG_READ_FOREIGN_SAMPLE', 'env', 'dsh-memory-main', '采样率（非法回落 0）', '跨租户读取采样（md_cg/mdcos.py:639）'),
     ('MDCG_RRF_CANDIDATES', 'env', 'dsh-memory-main', '整数', 'RRF 候选上限（md_cg/rrf_candidates.py:18）'),
+    ('MDCG_RANK_CREDIBILITY', 'env', 'dsh-memory-main', '开关', '名次可信度性质判据（md_cg/mdcos.py:2027）'),
     ('MDCG_SCRUB_INTERVAL', 'env', 'dsh-memory-main', '秒（float）', '常驻循环·清理档间隔（md_cg/mcp_server.py:4024）'),
     ('MDCG_SIGNER', 'env', 'dsh-memory-main', '字符串', '签名者标识（md_cg/signer.py:206,488）'),
     ('MDCG_STG_INDEX', 'env', 'dsh-memory-main', '开关', 'STG 索引（md_cg/stg.py:349）'),

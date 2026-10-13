@@ -106,7 +106,8 @@ def mutant(patches, name):
 GATE = (
     "            if _gate_on and len(_scores) >= 2 and (\n"
     "                    _whole_tie\n"
-    "                    or (_has_block and name in _RANK_ABSTAIN_PATHS)):")
+    "                    or (_has_block and name in _RANK_ABSTAIN_PATHS)\n"
+    "                    or _cred is not None):")
 GATE_LOOSE = "            if _gate_on and len(_scores) >= 2 and len(set(_scores)) == 1:"
 GATE_MULTI = "_gate_on = len(_active_paths) >= 2"
 ENT_LINE = '            aff = _tag_affinity(tags, query)      # issue #130：布尔命中 → 匹配强度'

@@ -133,6 +133,47 @@ TEMPORAL_DT_UNIT = "day"
 #:（读数见 `md_cg/test_time_core_lint.py` 的 G4 floor 组）。
 TEMPORAL_SCORE_FLOOR = 0.001
 
+#: 各路分数的**下限哨兵**：该路打分函数的下界。缺声明 ⇒ 本路不做 floor 判据。
+#: 新增路只需在此登记其下限（若确有下限），判据即自动覆盖——不再需要维护路名名单。
+#: 与 _RANK_ABSTAIN_PATHS 的本质区别：名单漏登记 ⇒ 该路**同族病理整体逃逸**；
+#: 下限漏登记 ⇒ 只少一条判据，whole_tie 仍在，**不会误伤**（fail-safe 方向相反）。
+PATH_SCORE_FLOORS = {"temporal": TEMPORAL_SCORE_FLOOR}
+
+
+# 生效条件：scores 为**已按 (-score,-importance,id) 排好序**的本路分数序列（float 列表）；
+# name 为该路名；floors 缺省取 PATH_SCORE_FLOORS。返回 None = 名次可信，否则返回
+# 不可信的理由串（"whole_tie" / "floor_mass"）。
+# 不适用条件：不判「分数是否有意义」（那需要 ground truth）；只判「名次是否由分数
+# 决定」——即「同分块内部的相对名次是否只由兜底键（id）决定」。纯函数、零 IO、
+# 零依赖、零训练、可复算（只读该路自己的分数序列）。
+def rank_credibility(name, scores, floors=None):
+    """该路本轮的名次是否可信（issue #197 / #205，与路名无关的性质判据）。
+
+    动机（issue #130 追评的残留）：原判据是**硬编码路名名单**
+    _RANK_ABSTAIN_PATHS = ("entity",)——用「路名」表达「名次不可信」这条
+    **性质**，于是 ① 同一文件 :1966 的注释自认 temporal 同病、名单却没它，
+    该路仍以全权重投票；② 新增检索路不会自动纳入（漏报风险）。
+
+    本判据锚定**机制**而非**表象**（#205 §1.1）：
+      · whole_tie：整路一个分数 ⇒ 路内序 = 兜底键序，名次零信息；
+      · floor_mass：该路声明的分数下限被 **>=2 个**候选取到 ⇒ 该块内分数不可分辨
+        （temporal 的退化形态：cred_factor 在 Δt 远大于 10 个半衰期后把分数夹在
+        TEMPORAL_SCORE_FLOOR 上，块内年龄信息被**完全擦除**）。
+    **不**把「存在同分块」当作不可信：lexical / chain / graph 也都含同分块
+    且它们是健康的（#205 §1.2(d) 实测：_has_block 型判据把 MRR 从 0.3469 打到
+    0.1306，-62%）——判据必须锚定「信息被擦除」这一机制，而不是「存在并列」。
+
+    阈值取 >= 2（1 个下限候选时其名次由它相对其余候选的分数唯一决定，无歧义）。
+    """
+    if not scores:
+        return None
+    if len(set(scores)) == 1:
+        return "whole_tie"          # 全路一个分数 ⇒ 路内序 = 兜底键序
+    fl = (floors if floors is not None else PATH_SCORE_FLOORS).get(name)
+    if fl is not None and sum(1 for s in scores if s == fl) >= 2:
+        return "floor_mass"         # 下限被夹住 ⇒ 该块内分数不可分辨
+    return None
+
 
 # ==========================================================================
 # W5 路线B · 路径指纹（path_fingerprint）：把「我走了哪条路」聚合成一个
@@ -1943,6 +1984,7 @@ class MdCGOS(MdCG):
         per_path = {}
         ro = set(recall_only or ())
         no_rank_signal = []          # 名次不可信的路（分数无判别力，见循环内判据）
+        _cred_detail = {}            # issue #197：性质判据的逐路理由（仅开关开时填充）
         # 契约的**生效条件**：只在「多路竞争」时启用（≥2 路实际产出候选）。
         # 单路时该路的名次就是唯一排序依据——没有别的路会被它挤掉，此时
         # `(-score, -importance, id)` 兜底序是**既有契约**：守卫
@@ -1977,9 +2019,19 @@ class MdCGOS(MdCG):
             # meta.no_rank_signal。按真实打分排序的路（lexical 等）**逐位不变**。
             _whole_tie = len(set(_scores)) == 1
             _has_block = len(set(_scores)) < len(_scores)
+            # issue #197 / #205：**与路名无关的性质判据**（缺省关）。开关关时
+            # _cred 恒 None、rank_credibility 一次都不被调用 ⇒ 门与 HEAD
+            # 逐位相同（_RANK_ABSTAIN_PATHS 分支原文保留，两条判据**并存**：
+            # 名单管「已知同族」、新判据管「按性质可判」，是刻意的冗余）。
+            _cred = None
+            if os.environ.get("MDCG_RANK_CREDIBILITY") == "1" and len(_scores) >= 2:
+                _cred = rank_credibility(name, _scores)
+                if _cred is not None:
+                    _cred_detail[name] = _cred
             if _gate_on and len(_scores) >= 2 and (
                     _whole_tie
-                    or (_has_block and name in _RANK_ABSTAIN_PATHS)):
+                    or (_has_block and name in _RANK_ABSTAIN_PATHS)
+                    or _cred is not None):
                 no_rank_signal.append(name)
                 ro.add(name)
                 continue
@@ -2118,6 +2170,10 @@ class MdCGOS(MdCG):
             "multi": sum(1 for _lst in prov.values()
                          if len({p.get("path") for p in _lst}) >= 2),
             "provenance": prov}
+        # issue #197：逐路理由**仅在开关开时**落键——否则 path_fingerprint.hash
+        # 会变，破坏「关闭时逐位不变」。
+        _cred_meta = ({"rank_credibility": dict(sorted(_cred_detail.items()))}
+                      if _cred_detail else {})
         _fp_selection = {
             "scanned": stat["scanned"],
             "gates": sorted((gates or {}).keys()) or None,
@@ -2125,7 +2181,7 @@ class MdCGOS(MdCG):
             "judge_ranking": bool(judge and judge_ranking),
             "judge_filtered": filtered,
             "early_stopped": early_stopped,
-            "no_rank_signal": sorted(no_rank_signal)}
+            "no_rank_signal": sorted(no_rank_signal), **_cred_meta}
         _path_fp = build_path_fingerprint(selection=_fp_selection,
                                           recursion=_fp_recursion,
                                           paths=_fp_paths)
@@ -2151,7 +2207,7 @@ class MdCGOS(MdCG):
                          "judge_ranking": bool(judge and judge_ranking),
                          "judge_filtered": filtered,
                          "early_stopped": early_stopped,
-                         "no_rank_signal": sorted(no_rank_signal),
+                         "no_rank_signal": sorted(no_rank_signal), **_cred_meta,
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,
@@ -2165,7 +2221,7 @@ class MdCGOS(MdCG):
                          "judge_ranking": bool(judge and judge_ranking),
                          "judge_filtered": filtered,
                          "early_stopped": early_stopped,
-                         "no_rank_signal": sorted(no_rank_signal),
+                         "no_rank_signal": sorted(no_rank_signal), **_cred_meta,
                          "expand_source": fuzzy_source,
                          "goal_used": goal_used,
                          "provenance": prov,

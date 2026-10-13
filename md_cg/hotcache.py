@@ -72,7 +72,12 @@ _BYPASS_EXTRA = ("query_expand",)
 _ENV_SWITCHES = ("MDCG_SEMANTIC", "MDCG_EN_ATOMS", "MDCG_UNIFY_QUERY",
                  "MDCG_RETRIEVAL_PIPELINE", "MDCG_S7_FRESHNESS",
                  "MDCG_CN_GRAMS", "MDCG_CHAIN_TYPES", "MDCG_TEMPORAL_GAMMA",
-                 "MDCG_RRF_CANDIDATES")
+                 "MDCG_RRF_CANDIDATES",
+                 # issue #197（2026-10-13）：名次可信度的**性质判据**开关。
+                 # 开启后在既有名单门之上追加 whole_tie（任意路）与
+                 # floor_mass（有下限声明的路）两条弃权分支 ⇒ 直接改变融合
+                 # 结果，同属「漏登即跨口径串味」的一类。
+                 "MDCG_RANK_CREDIBILITY")
 
 
 # 生效条件：无必需形参；返回 _ENV_SWITCHES 中每个变量名的 (名, 当前取值或 None) 元组（稳定、可哈希，随 query 缓存键一起参与比对）。
