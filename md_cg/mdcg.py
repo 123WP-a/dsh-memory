@@ -5331,8 +5331,16 @@ class MdCG:
                                     d.get("slot_overlap"), d.get("conclusion_overlap"),
                                     _route))
                 elif d.get("type") == "condition_clash":
-                    parts.append("条件互斥 vs %s（覆盖 %s）"
-                                 % (d.get("with"), d.get("score")))
+                    # issue #216：c1/c2 分路读数进人工裁决证据串（缺则走原样）。
+                    _cr = d.get("clash_routes")
+                    _cr_txt = ""
+                    if isinstance(_cr, dict) and _cr:
+                        _tm = _cr.get("terms") or {}
+                        _cr_txt = "／分路 c1 %s·c2 %s（词项 pos %s/neg %s·既有 pos %s/neg %s）" % (
+                            _cr.get("c1"), _cr.get("c2"), _tm.get("tw_pos"),
+                            _tm.get("tw_neg"), _tm.get("e_pos"), _tm.get("e_neg"))
+                    parts.append("条件互斥 vs %s（覆盖 %s%s）"
+                                 % (d.get("with"), d.get("score"), _cr_txt))
                 elif d.get("type"):
                     parts.append("%s vs %s" % (d.get("type"), d.get("with")))
         nid = self.add_unresolved(question=question, known_clues=clues,

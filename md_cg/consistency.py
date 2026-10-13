@@ -709,6 +709,19 @@ def check(cg, content, layer=None, condition_space=None,
         c1 = _cov(tw_pos, " ".join(e_neg)) if (tw_pos and e_neg) else 0.0
         c2 = _cov(tw_neg, " ".join(e_pos)) if (tw_neg and e_pos) else 0.0
         c = max(c1, c2)
+        # issue #216（2026-10-13 DSH 端）：**c1/c2 分路读数**。判据一字未动——
+        # c 仍 = max(c1, c2)、阈值与比较算子逐位不变；本改动只让「是哪一侧撑起
+        # 这次 condition_clash、两侧各自的词项规模是多少」变成可读读数。
+        # 为什么必须分路（issue #216 §〇 自己给出的教训）：c1/c2 是**两个独立事实**
+        # 的乘积——「既有节点是否声明了真 na」×「新节点词面是否覆盖该 na」。
+        # 只回传合并后的 c，读者无法判断改变的是哪一侧，读数不可复核。
+        # 词项规模一并回传，是因为稀释的方向取决于**哪一侧是合成串**：
+        # 新节点的 tw_pos 含 condition_space_text 合成串（词项多），而 tw_neg 只来自
+        # na（词项少）；既有节点侧则取决于它实际声明的写法。
+        clash_routes = {
+            "c1": round(c1, 4), "c2": round(c2, 4),
+            "terms": {"tw_pos": len(tw_pos or {}), "tw_neg": len(tw_neg or {}),
+                      "e_pos": len(e_pos or []), "e_neg": len(e_neg or [])}}
         # ---- L1-c 同侧比对：第二类关系（同条件空间 · 结论槽取值分歧） ----
         # 与 L1-b 是**两类不同关系**：L1-b 判「条件互斥」（反题），L1-c 判
         # 「同条件 + 同结论槽 + 取值不同」（矛盾）。后者在词面不可判——探针实测
@@ -766,6 +779,7 @@ def check(cg, content, layer=None, condition_space=None,
             "detail": ("新节点适用条件落在既有节点不适用区"
                        if c1 >= c2 else "新节点不适用条件覆盖既有节点适用区"),
             "score": round(c, 4),
+            "clash_routes": clash_routes,
             "pos_side": _dedup(pos)[:6], "neg_side": _dedup(neg)[:6]})
         seeds.append(nid)
         strength = max(strength, c)
