@@ -876,7 +876,7 @@ def _md_cg_import():
     if home not in sys.path:
         sys.path.insert(0, home)
     from md_cg.mdcos import MdCGSecure          # noqa: F401  载入即校验
-    from md_cg.mcp_server import _cg_dispatch   # noqa: F401
+    from md_cg.mcp_server import cg_dispatch    # noqa: F401
     from md_cg.security import Principal        # noqa: F401
     return home
 
@@ -951,8 +951,8 @@ def tool_lingshu_cg(args: dict, job_id: str, mdcg_root: str = None) -> dict:
         if not getattr(principal, "session", None):
             principal.session = f"hive_job_{job_id}"
         cg = MdCGSecure(root, principal=principal)
-        from md_cg.mcp_server import _cg_dispatch
-        out = _cg_dispatch(cg, args)
+        from md_cg.mcp_server import cg_dispatch
+        out = cg_dispatch(cg, args)
         # M3.1 工具层写后回读（批次7）：write 声称已落盘（committed=true）时，
         # 盘面必须真有该节点文件——提示词级回读纪律（9136fa9）可被模型绕过，
         # 结构拦截不依赖自觉（9·12 病灶：内存索引与盘面脱节，落盘率 ~14%）。

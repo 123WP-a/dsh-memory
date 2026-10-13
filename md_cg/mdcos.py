@@ -241,6 +241,10 @@ def _sig(text: str, n: int = 12) -> str:
     return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:n]
 
 
+# 公开别名：供 hive 侧引用，勿再直接引用私有名
+sig = _sig
+
+
 _SUBSTRING_CACHE_MAX_TERM = 64
 
 

@@ -2644,6 +2644,10 @@ def _cg_dispatch(cg, a):
     raise ValueError(f"cg 未知 op：{op}")
 
 
+# 公开别名：供 hive 侧引用，勿再直接引用私有名
+cg_dispatch = _cg_dispatch
+
+
 # 生效条件：由 _cg_dispatch 在 op=="ccg" 时进入；action 取 a.get("action") 缺省 "compile"；compile 只产出候选（落 _ccgc_pending/ 待复核、不当场写库），link 才准入落库，attest/recalibrate 须编外验证方且 verifier != compiled_by（E041/E042/E043 机械把关）；
 def _ccg_call(cg, a):
     """CCG 六要素编译器（op=ccg）：对话记录 → 六要素候选 → **编外复核** → 落库。
