@@ -66,6 +66,15 @@ class TokenType(Enum):
     BUDENGYU = auto()     # 不等于
     BUDAYU = auto()       # 不大于
     BUXIAOYU = auto()     # 不小于
+    # issue #180（2026-10-19）：复合比较词（大于等于/小于等于/大于或等于/小于或等于）
+    # ——此前词法表缺这四词，`甲 大于等于 乙` 里短词「大于」先行命中，余下的
+    # 「等于」+ 右操作数被并成字面量操作数（字节码证据 `PUSH_CONST 等于乙`）。
+    # 编译 ok=True / errors=[]，运行期却 TypeError:
+    # '>' not supported between 'float' and 'str'（静默错答）。
+    # 修法与 #127 同一条路：长词进 KEYWORDS，既有 SORTED_KW（按长度降序）＋
+    # _segment 正向最大匹配 ⇒ 长词先命中；后端 CMP_GE/CMP_LE 早已就绪。
+    DAYUDENGYU = auto()    # 大于等于 / 大于或等于
+    XIAOYUDENGYU = auto()  # 小于等于 / 小于或等于
     
     # === 循环关键字（当…执行：白箱循环语法）===
     DANG = auto()         # 当
@@ -138,6 +147,8 @@ KEYWORDS = {
     # 条件/逻辑
     "若", "则", "否则", "于", "为", "不为", "且", "或", "非",
     "等于", "大于", "小于",
+    # issue #180：复合比较词（长匹配优先——SORTED_KW 按长度降序，长词先命中）
+    "大于或等于", "小于或等于", "大于等于", "小于等于",
     # issue #127：否定比较词（长匹配优先——SORTED_KW 按长度降序，
     # 「不小于」先于「小于」命中）
     "不等于", "不大于", "不小于",
@@ -180,6 +191,11 @@ KEYWORD_MAP = {
     "不等于": TokenType.BUDENGYU,
     "不大于": TokenType.BUDAYU,
     "不小于": TokenType.BUXIAOYU,
+    # issue #180：复合比较词（同 #127 规则：独立 TokenType → parser 映射 >= / <=）
+    "大于等于": TokenType.DAYUDENGYU,
+    "大于或等于": TokenType.DAYUDENGYU,
+    "小于等于": TokenType.XIAOYUDENGYU,
+    "小于或等于": TokenType.XIAOYUDENGYU,
     "当": TokenType.DANG,
     "执行": TokenType.ZHIXING,
     "定义": TokenType.DINGYI,

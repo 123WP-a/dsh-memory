@@ -1003,6 +1003,9 @@ class Parser:
             # 三词导致 `不小于` 编译成 `甲不 < 乙`（字面相反）；补接线后
             # 映射到后端早已就绪的 >= / <= / !=。
             TokenType.BUXIAOYU, TokenType.BUDAYU, TokenType.BUDENGYU,
+            # issue #180：复合比较词（大于等于/小于等于/大于或等于/小于或等于）
+            # ——缺这四词时「大于」先行命中，余下「等于乙」成字面量操作数。
+            TokenType.DAYUDENGYU, TokenType.XIAOYUDENGYU,
         ):
             op_token = self.current_token
             op_map = {
@@ -1014,6 +1017,9 @@ class Parser:
                 TokenType.BUXIAOYU: ">=",
                 TokenType.BUDAYU: "<=",
                 TokenType.BUDENGYU: "!=",
+                # issue #180：复合比较词 → 后端早已就绪的 >= / <=
+                TokenType.DAYUDENGYU: ">=",
+                TokenType.XIAOYUDENGYU: "<=",
             }
             op = op_map.get(op_token.type, "==")
             self._advance()
