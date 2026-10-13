@@ -181,7 +181,11 @@ class VerifyResult:
 # v6（2026-08-31）：cases 形态修复（list→tuple）后指纹归一化同值，旧 False
 # 条目对修复免疫；bump 版本作废全部旧缓存——长驻进程内存快照复活毒条目的
 # 终局解（版本不符整体清空，任何进程加载即重建）。
-VERIFIER_VERSION = 11  # v11（issue #91 根因③）：L2/L3/集成三处执行一律改走**受控
+VERIFIER_VERSION = 12  # v12（issue #185 附带发现）：白名单补 `__build_class__`、
+                       # 命名空间补模块级 `__name__`（Py3 `class` 语句的两处必需
+                       # 依赖）——L2/L3 的执行环境因此改变，旧缓存（含「__build_class__
+                       # not found」时代的失败条目）不可信，bump 作废（同 v11 口径）。
+                       # v11（issue #91 根因③）：L2/L3/集成三处执行一律改走**受控
                        # 时限子进程**（超时 fail-closed，不再可能永久挂死）；判据面
                        # 变更（执行环境与用例过境编码）故 bump 作废旧缓存。v10：结构规范的字面匹配改大小写不敏感——该表是语言无关的
                        # 任务语义判据（要求去重结构出现），字面取自 Python 命名习惯
@@ -234,6 +238,15 @@ def _table_payload_chars() -> int:
 # 就已执行（实测 open() 载荷：ok=False 但副作用文件已创建）。
 # 本白名单保留常用纯函数与异常类型，**去掉** open / __import__ / eval / exec / compile /
 # globals / locals / vars / dir / input / breakpoint —— 即「能算出答案，但碰不到外面」。
+#
+# issue #185 附带发现（2026-10-09 DSH 端）：上面这份白名单缺 `__build_class__` ⇒ Py3 里
+# 一切含 `class` 的被测代码都在 L2 样例以「__build_class__ not found」判负（本批递归
+# 发现新收进门的三个生态测试，其红由此第一次暴露）。
+# 为何补它：`class` 语句先向 builtins 取 `__build_class__`，再由它执行类体；类体头两条
+# 指令是 `LOAD_NAME __name__` → `STORE_NAME __module__`，故受限命名空间还须给一个
+# 模块级 `__name__`（纯字符串全局；见下方 `_safe_builtins()`/SAFE_NS() 与子进程执行器）。
+# 安全边界：`__build_class__` 只是「定义类」的定义钩子，不提供文件/网络/进程能力；
+# 上面明令去掉的 open / __import__ / eval / exec / compile 等**不得**因此被放开。
 # 无超时（#91 根因③）已由本文件同批的「受控时限子进程」补齐——见下方 EXEC_TIMEOUT_S 段；
 # 该白名单被**父侧 SAFE_NS() 与子进程侧 `_EXEC_RUNNER_SRC` 共用同一份**（单一真源）。
 import builtins as _bi
@@ -244,16 +257,33 @@ _SAFE_BUILTIN_NAMES = (
     "list", "map", "max", "min", "next", "object", "ord",
     "pow", "print", "range", "repr", "reversed", "round",
     "set", "slice", "sorted", "str", "sum", "tuple", "type", "zip",
+    "__build_class__",
     "Exception", "ValueError", "TypeError", "KeyError",
     "IndexError", "ZeroDivisionError", "StopIteration",
     "ArithmeticError", "AttributeError", "AssertionError",
     "NotImplementedError", "RuntimeError", "True", "False", "None")
 
 
+_SAFE_MODULE_NAME = "__mdcg_verify__"
+# ↑ 执行命名空间的**模块级** `__name__`：class 体的 `LOAD_NAME __name__` 需要它。
+#   它是纯字符串全局，**不是** builtin —— builtins 白名单边界不因此放宽。
+
+
+def _safe_builtins() -> Dict[str, Any]:
+    """受限 builtins 白名单映射——**单一真源**（父侧 SAFE_NS() 与子进程执行器同用一份）。
+
+    安全边界（issue #185）：本映射只提供「算得出答案」的纯函数与异常类型。
+    `__build_class__` 仅是 `class` 语句的**定义钩子**——CPython 在类体执行前由
+    builtins 查表调用它，它不提供文件/网络/进程能力。危险能力（open /
+    __import__ / eval / exec / compile / globals / locals / vars / dir /
+    input / breakpoint）**一律不在**本映射内，且不得因本项而放开。
+    """
+    return {k: getattr(_bi, k) for k in _SAFE_BUILTIN_NAMES if hasattr(_bi, k)}
+
+
 def SAFE_NS() -> Dict[str, Any]:
-    """被校验代码的执行命名空间：仅暴露 SAFE_BUILTIN_NAMES 内的内建。"""
-    _b = {k: getattr(_bi, k) for k in _SAFE_BUILTIN_NAMES if hasattr(_bi, k)}
-    return {"__builtins__": _b}
+    """被校验代码的执行命名空间：受限 builtins + 模块级 `__name__`（class 体需要）。"""
+    return {"__builtins__": _safe_builtins(), "__name__": _SAFE_MODULE_NAME}
 
 
 # 白箱被校验代码允许导入的标准库（其余一律 L1 拒——见 `_check_l1_syntax`）。
@@ -429,7 +459,7 @@ def main():
         out["exec_err"] = str(e)
         dump()
         return
-    ns = {"__builtins__": _safe_builtins()}
+    ns = {"__builtins__": _safe_builtins(), "__name__": "__mdcg_verify__"}
     try:
         exec(compile(p["code"], "<verify>", "exec"), ns)
     except Exception as e:

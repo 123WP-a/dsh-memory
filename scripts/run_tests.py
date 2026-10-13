@@ -177,13 +177,29 @@ def _run_one(name, argvs, timeout, parallel=False):
     return name, False, last
 
 
-# 生效条件：当模块级常量 _REPO 下 md_cg/whitebox_kb/wisdom/wisdom-book-cloud.db 存在时返回 None，不存在时返回依赖缺失说明字符串；
+# 生效条件：当模块级常量 _REPO 下 md_cg/whitebox_kb/wisdom/wisdom-book-cloud.db 存在、可读且 nodes 表有行时返回 None，否则返回依赖缺失/空壳说明字符串；
 def _dep_db():
     p = os.path.join(_REPO, "md_cg", "whitebox_kb", "wisdom",
                      "wisdom-book-cloud.db")
-    return (None if os.path.exists(p)
-            else "依赖白箱库 whitebox_kb/wisdom/wisdom-book-cloud.db"
-                 "（.gitignore 忽略，需本地生成）")
+    if not os.path.exists(p):
+        return ("依赖白箱库 whitebox_kb/wisdom/wisdom-book-cloud.db"
+                "（.gitignore 忽略，需本地生成）")
+    # **空壳不算就绪**（与 _dep_mdroot 同口径，2026-10-13）：兄弟测试一旦建过库
+    # 就留下 0 行的空 db，只判 exists 会把「本该 SKIP」的目标变成 FAIL，且失败
+    # 形态随机（取决于谁先跑）。判据 = nodes 表有行；读不动一律按未就绪。
+    try:
+        import sqlite3
+        c = sqlite3.connect("file:%s?mode=ro" % p.replace("\\", "/"), uri=True)
+        try:
+            n = c.execute("select count(*) from nodes").fetchone()[0]
+        finally:
+            c.close()
+    except Exception:                                    # noqa: BLE001
+        n = 0
+    if n > 0:
+        return None
+    return ("依赖白箱库 wisdom-book-cloud.db 为**空壳**（存在但 nodes 表 0 行）"
+            "——需本地生成；空壳多为兄弟测试残留，不算就绪")
 
 
 # 生效条件：当模块级常量 _REPO 下 _md_cg_wisdom_graph 为目录、且其下（递归）至少有一个 .md 文件时返回 None；目录缺失或为无 .md 的空壳目录时返回依赖缺失说明字符串；
@@ -243,6 +259,9 @@ _SKIPS = {
     "md_cg.test_p44_md_whitebox": _dep_db_and_mdroot,
     "md_cg.test_md_access_parity": _dep_db_and_mdroot,
     "md_cg.test_wisdom_md_store": _dep_mdroot,
+    # 同 `_dep_db` 口径（2026-10-13，issue #185 递归发现后暴露）：本件第 19 行
+    # 直读 `wisdom-book-cloud.db`（.gitignore 忽略，需本地生成），裸 clone 必红。
+    "md_cg.whitebox_kb.wisdom.test_navigate_self_bootstrap": _dep_db,
     "md_cg.test_imgskill": _dep_pil,
     "md_cg.test_csre_index_import_guard": _dep_numpy,
     "swarm.tests.test_swarm_fault": (
