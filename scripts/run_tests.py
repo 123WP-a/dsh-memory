@@ -148,7 +148,8 @@ def _discover():
 
 # 生效条件：给定 name、候选命令列表 argvs、超时秒数 timeout（parallel=True 时向子进程
 # 加传 MDCG_RUN_TESTS_PARALLEL=1 的并行信号），逐个 subprocess.run（cwd 为模块级常量
-# _REPO，env 在 os.environ 基础上覆盖 PYTHONUTF8=1/PYTHONIOENCODING=utf-8，shell=False，
+# _REPO，env 由 _child_env(parallel) 构造（os.environ 基底 + PYTHONUTF8=1 /
+# PYTHONIOENCODING=utf-8，并剔除 _SESSION_ENV_STRIP 中的会话类键），shell=False，
 # encoding="utf-8"/errors="replace"）：抛 TimeoutExpired 即返回 (name, False,
 # f"超时（>{timeout}s）")；若 returncode!=0 且 stderr 含 "No module named" 且
 # len(argvs)>1 则记下该 stderr 末 300 字符继续下一候选，否则返回 (name,
@@ -158,9 +159,7 @@ def _run_one(name, argvs, timeout, parallel=False):
     # parallel（2026-10-03 外部报告核验新增）：负载敏感的性能断言（见
     # md_cg/test_index_crossprocess_reload ⑥）据此在并行下明示豁免、串行照测——
     # 语义断言不受影响，覆盖不丢（对比 _SERIAL_ONLY 的整测试跳过——那个教训在集合注释里）。
-    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-    if parallel:
-        env["MDCG_RUN_TESTS_PARALLEL"] = "1"
+    env = _child_env(parallel)
     last = ""
     for argv in argvs:                    # -m 优先；No module named 时回退直跑
         try:
@@ -286,6 +285,28 @@ _SERIAL_ONLY = {
     # 运行」比偶发红更贵；且跳过符只作用于本层 run_tests，挡不住嵌套套件
     # （md_cg/test_interop_judgment.py:202 内层 run_tests）与手跑并发的第二实例。
 }
+
+
+# 会话类 env 剔除名单（issue #196 / #198，2026-10-13）：宿主/部署侧注入会话 id
+# （DSH_SESSION_ID / MDCG_SESSION）时，md_cg/stg.py::_view_session 的 env 权威分支
+# 会把守卫夹具声明的会话改写成 env 值，timeline(session=夹具会话) 恒 0 条——
+# 同一条守卫在「有 env 的开发机」上红、在干净 CI 上绿，属**假红**（被测代码无过）。
+# 本处统一剔除，使守卫只看被测代码；env 权威本身是 #128 的刻意设计，不属本条。
+_SESSION_ENV_STRIP = ("MDCG_SESSION", "DSH_SESSION_ID", "DSH_SESSION")
+_STRIP_UPPER = frozenset(_k.upper() for _k in _SESSION_ENV_STRIP)
+
+
+# 生效条件：parallel 为真值时在返回的 env 中加 MDCG_RUN_TESTS_PARALLEL="1"；返回的 dict
+# 以 os.environ 为基底、覆盖 PYTHONUTF8="1" 与 PYTHONIOENCODING="utf-8"，并**逐键剔除**
+# 大小写不敏感命中 _STRIP_UPPER 的键（宿主会话 env 不得进入测试子进程）；不修改 os.environ。
+def _child_env(parallel=False):
+    """构造测试子进程 env：UTF-8 约定 + 剔除宿主会话类变量（见 _SESSION_ENV_STRIP）。"""
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    for _k in [k for k in env if k.upper() in _STRIP_UPPER]:
+        env.pop(_k, None)
+    if parallel:
+        env["MDCG_RUN_TESTS_PARALLEL"] = "1"
+    return env
 
 
 # 生效条件：解析命令行（位置参数 group 为 nargs="*"、default=None，-k 默认 ""，--jobs 默认 4，--timeout 默认 900，--list 为 store_true）后，若 args.group 里有不在 ("md_cg","compiler","swarm","scripts","hive") 中的组名则 ap.error 报错退出（args.group 为 None 或空列表时该检查不触发）；groups 取 set(args.group) 或（其为假值时）全部五组；targets 由 _discover() 按 groups 过滤且 args.k 为假值或出现在显示名中；args.list 为真时打印组名与显示名及总数并返回 0；否则先按 _SKIPS 探测跳过有原因的目标，再以 max(1, args.jobs) 个线程跑 _run_one(name, a, args.timeout)，无失败打印汇总返回 0，有失败打印失败名单返回 1；
