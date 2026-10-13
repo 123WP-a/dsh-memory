@@ -458,11 +458,24 @@ def _ccg_field(content: str, name: str) -> str:
     收口范围（硬约束「单点优先，第二处委托调用」）：本函数是条件取值的唯一
     读点——`_declared_conditions`（既有节点侧）与 `consistency._new_terms`
     （新节点侧，经 `consistency._prims` :100 取用本函数）**都**从这里取条件行，
-    故一处收口即两函数同步；`_new_terms` 所在的 consistency.py 不在本席改动面
+    故**这两行**的收口即两函数同步（⚠ 见本函数体首行的 #215 更正：条件**行**同源不等于「正条件的全部来源」同源）；`_new_terms` 所在的 consistency.py 不在本席改动面
     内，靠委托生效，不另写第二份判据。**只对 `_COND_FIELDS` 生效**：功能名/
     执行/子功能等非条件字段取值面一字不动（backfill/crosscheck/consolidate
     的条件改写与 `_slot_text` 的结论槽比对均不受影响）。
     """
+    # ⚠ issue #215（2026-10-13 DSH 端）**更正上方声明的范围**：本函数收口的
+    # 是**条件行**，不是「正条件的全部来源」。consistency._new_terms 在取完
+    # 条件行之后**额外并入 condition_space 各槽值**（consistency.py 内实现，
+    # 非经本函数），而 _declared_conditions **不读 condition_space**。
+    # 故两侧口径**不同源**：
+    #     新节点侧 pos = [条件行] + [槽值…]
+    #     既有节点侧 pos = [条件行]（+ comment.生效条件 / fm 声明）
+    # 原注释「故一处收口即两函数同步」**超出了本函数的收口范围**，据此判断
+    # 「两侧已同源」是错的。该不同源正是 issue #215 报的 L1-c 静默失效的
+    # 直接成因：默认落盘形态下 c3 实测 0.7455，恰在 SAME_COND_HIGH=0.75 之下
+    # （对齐形态 0.7914），阈值一字未动。
+    # 两侧**是否应**同源属设计裁定（见该 issue 回复）；本注释只登记**事实**。
+    # 口径差经 consistency.check 的 cond_routes 字段回传，可供复核。
     val = nodefile.ccg_field_value(content, name) or ""
     if name in _COND_FIELDS and val and _is_null_condition(val):
         return ""

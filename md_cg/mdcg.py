@@ -5341,10 +5341,17 @@ class MdCG:
                         _route = "／槽位分路 功能名 %s·子功能 %s%s" % (
                             _sr.get("功能名"), _sr.get("子功能"),
                             "（仅一路达标）" if d.get("slot_single_route") else "")
-                    parts.append("同条件取值分歧 vs %s（条件重合 %s / 槽位 %s / 结论差异 %s%s）"
+                    # issue #215：两侧口径差进证据串（缺则走原样）。
+                    _cd = d.get("cond_routes")
+                    _cd_txt = ""
+                    if isinstance(_cd, dict) and _cd:
+                        _cd_txt = "／条件两侧 新 %s 项·既有 %s 项·%s" % (
+                            _cd.get("new_side"), _cd.get("existing_side"),
+                            "同源" if _cd.get("same_source") else "**不同源**")
+                    parts.append("同条件取值分歧 vs %s（条件重合 %s / 槽位 %s / 结论差异 %s%s%s）"
                                  % (d.get("with"), d.get("same_condition"),
                                     d.get("slot_overlap"), d.get("conclusion_overlap"),
-                                    _route))
+                                    _route, _cd_txt))
                 elif d.get("type") == "condition_clash":
                     # issue #216：c1/c2 分路读数进人工裁决证据串（缺则走原样）。
                     _cr = d.get("clash_routes")

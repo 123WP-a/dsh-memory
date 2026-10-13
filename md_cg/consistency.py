@@ -732,6 +732,21 @@ def check(cg, content, layer=None, condition_space=None,
         c3 = _cov(tw_pos, " ".join(e_pos)) if (tw_pos and e_pos) else 0.0
         c4 = _cov(tw_neg, " ".join(e_neg)) if (tw_neg and e_neg) else 0.0
         same_cond = max(c3, c4)
+        # issue #215（2026-10-13 DSH 端）：**两侧口径差回传**。判据一字未动——
+        # same_cond 仍 = max(c3, c4)、阈值与比较算子逐位不变；本改动只让
+        # 「新节点侧与既有节点侧各自解析出了什么」变成可读读数。
+        # 为什么必须回传（issue #215 的核心）：两侧**不同源**——新节点侧
+        # _new_terms 并入 condition_space 各槽值，既有节点侧 _declared_conditions
+        # 不读 condition_space。故 c3 的分子含槽值、分母不含，覆盖率被系统性压低。
+        # 此前回传体里只有合并后的 same_condition 一个数，读者**无法判断**这个数
+        # 低是因为「两侧真的不同条件」还是因为「两侧口径不同源」。
+        # 与 #216/#217/#218 同一条教训：合成读数必须分路/附来源，否则不可复核。
+        cond_routes = {
+            "c3": round(c3, 4), "c4": round(c4, 4),
+            "new_side": len(pos or []), "existing_side": len(e_pos or []),
+            "only_new_side": [x for x in (pos or []) if x not in (e_pos or [])][:6],
+            "only_existing_side": [x for x in (e_pos or []) if x not in (pos or [])][:6],
+            "same_source": list(pos or []) == list(e_pos or [])}
         if same_cond >= SAME_COND_HIGH:
             e_fn, e_sb = _slot_text(body)
             # issue #217（2026-10-13 DSH 端）：**逐路先算再取 max**。判据一字未动
@@ -764,6 +779,7 @@ def check(cg, content, layer=None, condition_space=None,
                         "detail": ("适用条件与结论槽均重合但取值不同："
                                    "可能是更正（应覆盖旧值）或分歧（应补区分条件）"),
                         "same_condition": round(same_cond, 4),
+                        "cond_routes": cond_routes,
                         "slot_overlap": round(slot, 4),
                         "slot_routes": {"功能名": round(slot_fn, 4),
                                         "子功能": round(slot_sb, 4)},
