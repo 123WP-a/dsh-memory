@@ -5318,9 +5318,18 @@ class MdCG:
                 if not isinstance(d, dict):
                     continue
                 if d.get("type") == "same_condition_divergence":
-                    parts.append("同条件取值分歧 vs %s（条件重合 %s / 槽位 %s / 结论差异 %s）"
+                    # issue #217：分路读数进人工裁决证据串。缺 slot_routes 的历史
+                    # 记录（或别处构造的分歧条目）走原样，不因新键缺失而变形。
+                    _sr = d.get("slot_routes")
+                    _route = ""
+                    if isinstance(_sr, dict) and _sr:
+                        _route = "／槽位分路 功能名 %s·子功能 %s%s" % (
+                            _sr.get("功能名"), _sr.get("子功能"),
+                            "（仅一路达标）" if d.get("slot_single_route") else "")
+                    parts.append("同条件取值分歧 vs %s（条件重合 %s / 槽位 %s / 结论差异 %s%s）"
                                  % (d.get("with"), d.get("same_condition"),
-                                    d.get("slot_overlap"), d.get("conclusion_overlap")))
+                                    d.get("slot_overlap"), d.get("conclusion_overlap"),
+                                    _route))
                 elif d.get("type") == "condition_clash":
                     parts.append("条件互斥 vs %s（覆盖 %s）"
                                  % (d.get("with"), d.get("score")))

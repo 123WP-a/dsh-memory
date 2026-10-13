@@ -721,11 +721,17 @@ def check(cg, content, layer=None, condition_space=None,
         same_cond = max(c3, c4)
         if same_cond >= SAME_COND_HIGH:
             e_fn, e_sb = _slot_text(body)
-            slot = max(
-                _cov(expand_query_terms_weighted(n_fn), e_fn)
-                if (n_fn and e_fn) else 0.0,
-                _cov(expand_query_terms_weighted(n_sb), e_sb)
-                if (n_sb and e_sb) else 0.0)
+            # issue #217（2026-10-13 DSH 端）：**逐路先算再取 max**。判据一字未动
+            # ——slot 仍 = max(两路)，裁决结果逐位不变；本改动只把「是哪一路撑起了
+            # 槽位」变成可读读数。此前只回传合并后的 slot，读者无法判断「仅一路相符」，
+            # 该失效是静默的（回传体里没有任何字段记录它）。
+            # 与 #216 同一条教训：c1/c2、槽位这类**多路合成**读数，回传面必须分路，
+            # 否则读数不可复核。
+            slot_fn = (_cov(expand_query_terms_weighted(n_fn), e_fn)
+                       if (n_fn and e_fn) else 0.0)
+            slot_sb = (_cov(expand_query_terms_weighted(n_sb), e_sb)
+                       if (n_sb and e_sb) else 0.0)
+            slot = max(slot_fn, slot_sb)
             if slot >= SLOT_HIGH:
                 # 同口径比对（正文↔正文）：tw_content 已去模板行 + 两侧同一套
                 # 空白归一化（H8），见上文与 `_norm_ws` / `_nows` 说明。
@@ -746,6 +752,10 @@ def check(cg, content, layer=None, condition_space=None,
                                    "可能是更正（应覆盖旧值）或分歧（应补区分条件）"),
                         "same_condition": round(same_cond, 4),
                         "slot_overlap": round(slot, 4),
+                        "slot_routes": {"功能名": round(slot_fn, 4),
+                                        "子功能": round(slot_sb, 4)},
+                        "slot_single_route": (
+                            (slot_fn >= SLOT_HIGH) != (slot_sb >= SLOT_HIGH)),
                         "conclusion_overlap": round(concl, 4),
                         "slot": (n_fn or n_sb)[:40]})
         if c < CLASH_LOW:
