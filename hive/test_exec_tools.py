@@ -717,7 +717,9 @@ def _fake_dispatch(cg, args, **kw):
 from md_cg import mcp_server as _msrv
 from unittest import mock as _mock
 
-with _mock.patch.object(_msrv, "_cg_dispatch", _fake_dispatch):
+# issue #184（本批）：exec.py 改为引用**公开名** cg_dispatch（md_cg/mcp_server.py 里 `cg_dispatch = _cg_dispatch`，静态绑定）——
+# 桩打在私有名 _cg_dispatch 上不再影响调用点。patch 目标 = 契约面/公开名。
+with _mock.patch.object(_msrv, "cg_dispatch", _fake_dispatch):
     # I1 worker 写 knowledge → 拦（收口写归编排者）
     out = ex.tool_lingshu_cg(
         {"op": "write", "content": "x", "layer": "knowledge"}, "job_i1")
@@ -760,7 +762,7 @@ check("J2 声明含「不填=现行为」默认规则（不自动推导）",
       "不填=现行为" in _props["valid_from"]["description"]
       and "不填" in _props["valid_until"]["description"])
 _captured.clear()
-with _mock.patch.object(_msrv, "_cg_dispatch", _fake_dispatch):
+with _mock.patch.object(_msrv, "cg_dispatch", _fake_dispatch):
     out = ex.tool_lingshu_cg(
         {"op": "write", "content": "时效结论", "layer": "contextual",
          "valid_from": "2026-09-23", "valid_until": "2026-12-31"}, "job_j")
