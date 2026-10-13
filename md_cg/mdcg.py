@@ -4041,6 +4041,11 @@ class MdCG:
               layer/role 维度），view 非空时叠加资格谓词；非法视图
               ValueError（fail-closed 只针对调用方误用）。
         """
+        # issue #275：非法 layer 从「静默空结果」改为 fail-closed（与同一签名的
+        # view / time_axis 同处置；口径与 add 侧校验逐字一致）。
+        # 基类与 MdCGOS 两处入口**同口径**——防「同名方法两份、只一份受守」。
+        if layer and layer not in LAYERS:
+            raise ValueError(f"未知层：{layer}（允许：{LAYERS}）")
         q = (query or "").strip()
         # 批次 15 统一口径（unify.py，2026-09-30 收窄作用域）：只译**英文内容**
         # → 标准原子序列，中文段逐字原样（不再整条归一）；纯中文/无 ASCII 字母

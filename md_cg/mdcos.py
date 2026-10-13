@@ -33,7 +33,10 @@ from .mdcg import (MdCG, expand_query_terms, bigrams, normalize_en, STATE_ACCEPT
                    expand_query_terms_llm, en_zh_bigrams, semantic_on,
                    cut_by_relevance, apply_retrieval_gates, NEG_ROUTE_LAYERS,
                    # P2-3（§5.4）：六要素后两行索引键的召回判据单点（mdcg 侧）
-                   index_key_hits, boundary_mark)
+                   index_key_hits, boundary_mark,
+                    # issue #275：层名合法集合——search 侧 layer 校验与 add 侧
+                    # 同口径（唯一真源在 mdcg.LAYERS，此处只引入不复制）
+                    LAYERS)
 from . import (nodefile, routing, chain, subgraph, forgetting, protect,
                identity, consistency, metacognition, crypto, sustain,
                self_state, predict, evolution, weights, pooling,
@@ -1054,7 +1057,19 @@ class MdCGOS(MdCG):
         （恰是默认候选池剔除的补集，须接管 role 维度裁决才可达）。非法
         view ValueError（fail-closed 只针对调用方误用）；roles 显式参数
         仍优先于 view。
+        layer：限定层。**非法层名 fail-closed**（issue #275）——与同一签名里的
+        view / time_axis 同处置（两者对非法值都 ValueError，而 layer 原先静默）。
+        静默的后果是 search(layer="knowledg")（拼错）与「该层真的没有节点」
+        **返回逐字节相同**（实测均为 ([], {reason: no_candidates, scanned: 0})），
+        调用方无从自我纠正。校验口径**复用 add 侧既有实现**（未知层：…（允许：…）），
+        不发明新机制；假值（None/空串）一律视为「未指定」，逐位保留原行为
+        （原先 not layer 即不过滤）。本点是 MdCGOS 侧 search/search_rrf 的**共同**
+        候选汇聚点，故校验置于此即可覆盖两个入口。
         """
+        # issue #275：非法 layer 从「静默空结果」改为 fail-closed（与 view/time_axis
+        # 同处置；口径与 add 侧校验逐字一致）。
+        if layer and layer not in LAYERS:
+            raise ValueError(f"未知层：{layer}（允许：{LAYERS}）")
         now = time.time() if validity else None
         out = []
         for e in list(self.index["nodes"].values()):
