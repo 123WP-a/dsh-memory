@@ -337,6 +337,11 @@ ENV_ROWS = [
     ('IMGSKILL_PILLOW', 'TUNE', 'tune', 'env', True, 'None', 'str', 'on', 'IMGSKILL_PILLOW', 'on', 'env_flag', 'md_cg/imgskill.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）；有效缺省（盘点文字，未 AST 复核）：未设 = 允许（=="0" 显式禁用 Pillow 后端）', 'unknown', ''),
     ('MDCG_PLAIN_CACHE_MAX', 'TUNE', 'tune', 'env', True, '256', 'str', 'value', 'MDCG_PLAIN_CACHE_MAX', 'value', 'env_literal', 'md_cg/mdcos.py', '', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）；有效缺省：未设 = 256（解密明文缓存条目上限，超出按插入序淘汰最旧）', 'unknown', ''),
     ('MDCG_WRITE_ATTEMPT_ROTATE_BYTES', 'TUNE', 'tune', 'env', True, 'None', 'str', 'value', 'MDCG_WRITE_ATTEMPT_ROTATE_BYTES', 'value', 'env_helper_default', 'md_cg/writepipe.py', 'ATTEMPT_ROTATE_DEFAULT', 'uncalibrated', '由生成器自 AST 复核（第一批未见标定读数）；有效缺省：未设 = 64<<20 （尝试账本活动文件轮转阈值，<=0 表示不轮转；坏值回落缺省、不丢账）', 'unknown', ''),
+    ('MDCG_WRITE_ATTEMPT_LEDGER', 'TUNE', 'tune', 'env', True, 'None', 'str',
+     'on', 'MDCG_WRITE_ATTEMPT_LEDGER', 'on', 'env_helper_default',
+     'md_cg/writepipe.py', 'ATTEMPT_LEDGER_DEFAULT', 'uncalibrated',
+     '由生成器自 AST 复核（第一批未见标定读数）；有效缺省：未设 = True（尝试账本总开关，缺省开——留痕面与 _audit/_write_2pc 同口径；显式 0/false/no/off 停用，停用不改写入语义）',
+     'unknown', ''),
 ]
 
 # 环境面**分类登记**（只登记「属于环境面」与值域类型；**不登记缺省值**）

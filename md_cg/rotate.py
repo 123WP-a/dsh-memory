@@ -36,7 +36,7 @@ import os
 import time
 
 from .fsutil import (FileLock, append_jsonl, atomic_write, count_jsonl,
-                     publish)
+                     publish, read_jsonl)
 
 
 # 生效条件：path 为日志路径、count_max_bytes 为规模阈值、est_sample 为尾部采样字节数、counter 为行数计数器（缺省 count_jsonl）时，先 os.stat；OSError 返回 {'bytes':0,'mtime':None,'events':0,'exact':True}；size 不超过 count_max_bytes 时返回 counter(path) 的精确条数与 exact=True；否则读末尾 est_sample 字节估算 events、exact=False 并附 note（不触发任何全量计数）。
@@ -129,6 +129,23 @@ class Rotator:
         prefix = self.basename + "."
         return sorted(n for n in names
                       if n.startswith(prefix) and n.endswith(".jsonl"))
+
+# 生效条件：无必需形参；按 shards() 的字典序（== 时间序）逐个读归档分片、最后读活动
+# 文件，返回记录列表；limit 为真时只取尾部 limit 条；单个文件不可读时按空计。
+    def read_records(self, limit=0):
+        """活动文件 + 全部分片的记录（**归档感知**读面，#212 缺口 4）。
+
+        为什么放在 Rotator 而不是各账本各写一份：shards() 已把「序号零填充 ⇒
+        字典序 == 时间序」这条口径钉在这里，读面必须与它同源，否则又会长出
+        「写侧按分片序号、读侧按 mtime」的第二口径。
+        """
+        recs = []
+        for name in self.shards():
+            recs.extend(read_jsonl(os.path.join(self.archive, name)))
+        recs.extend(read_jsonl(self.active))
+        if limit:
+            recs = recs[-int(limit):]
+        return recs
 
 # 生效条件：self._index 为 None 时尝试读取 archive 中 index_name 并过滤 value 为 dict，读取失败或数据非 dict 时为空字典，随后缓存并返回；非 None 时不重读直接返回。
     def load_index(self) -> dict:

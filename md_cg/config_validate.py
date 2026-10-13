@@ -85,6 +85,7 @@ RULES = {
     'MDCG_TOOL_FACE': {'bool_like': True, 'type': 'bool'},
     'MDCG_UNIFY_QUERY': {'bool_like': True, 'true_literals': ['1'], 'type': 'bool'},
     'MDCG_WRITELIMIT': {'bool_like': True, 'type': 'bool'},
+    'MDCG_WRITE_ATTEMPT_LEDGER': {'bool_like': True, 'type': 'bool'},
     'MDCG_WRITE_ATTEMPT_ROTATE_BYTES': {'type': 'str'},
     'PREDICTION_META_DIM': {'type': 'str'},
     'PREDICTION_META_PROXY': {'type': 'str'},

@@ -48,7 +48,8 @@ import time
 from . import twophase, trust
 from .fsutil import append_jsonl
 
-__all__ = ["WritePipeline", "default_pipeline"]
+__all__ = ["WritePipeline", "default_pipeline", "oversize_response",
+           "attempt_history"]
 
 
 #: #142②（2026-10-12 DSH 端）· **写入尝试账本**（issue §3.3(e) 方案 1「另立一本账」）。
@@ -73,6 +74,26 @@ ATTEMPT_COMMITTED = "committed"
 ATTEMPT_SHORT_CIRCUIT = "short_circuit"
 ATTEMPT_ERROR = "error"
 
+#: #212 缺口 3（2026-10-13 DSH 端）：尝试账本的**总开关**。此前本账常开——
+#: 运行时显式设 MDCG_WRITE_ATTEMPT_LEDGER=0，账本仍写一行（该 env 名全仓 0 命中，
+#: 确实无效），且四个记账调用点全无条件 ⇒ 每次写入无条件付这笔开销（实测落盘
+#: 1,013.3 B/次、短路 303.2 B/次）。
+#: 缺省**开**：本账是**留痕面**（不改裁决/排序/资格），与 _audit.jsonl /
+#: _write_2pc.jsonl 同口径；「默认关」纪律的适用对象是**行为性改动**（会改变
+#: 裁决结果的那类，如 MDCG_PROPOSAL_EMOTION）。停用只停留痕，**不改写入语义**。
+ATTEMPT_LEDGER_ENV = "MDCG_WRITE_ATTEMPT_LEDGER"
+#: 有效缺省（G2 锚点符号，见 md_cg/config_registry_bulk.py 的登记行）。
+ATTEMPT_LEDGER_DEFAULT = True
+
+# 生效条件：env ATTEMPT_LEDGER_ENV 未设或为空白时返回 ATTEMPT_LEDGER_DEFAULT（True）；
+# 取值去空白并 lower 后属 0/false/no/off 时返回 False；其余取值一律 True。
+def _attempt_ledger_enabled() -> bool:
+    """尝试账本总开关（缺省开，仅显式关闭值停用）。"""
+    raw = os.environ.get(ATTEMPT_LEDGER_ENV)
+    if raw is None or not str(raw).strip():
+        return bool(ATTEMPT_LEDGER_DEFAULT)
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
 
 # 生效条件：env ATTEMPT_ROTATE_ENV 缺席或为空白时返回 ATTEMPT_ROTATE_DEFAULT；为可解析整数时返回该整数（<=0 表示不轮转）；不可解析时回落 ATTEMPT_ROTATE_DEFAULT，配置坏值不导致丢账；
 def _attempt_rotate_bytes() -> int:
@@ -86,7 +107,7 @@ def _attempt_rotate_bytes() -> int:
         return ATTEMPT_ROTATE_DEFAULT
 
 
-# 生效条件：无前置；按 outcome 组装一行尝试记录（t/outcome/id/resp_id ＋ 非 None 的 content_kind/layer/halted_by/error/rotate_error），阈值>0 且活动账本已达阈值时先经 Rotator.rotate 切分活动账本、再 append_jsonl 追加；轮转失败**不丢账**（本行照记并如实留 rotate_error）；**自身绝不外抛**——out 是 dict 时写 out["attempt_ledger_error"]、否则写 stderr（不静默、不改写写入语义）；
+# 生效条件：ATTEMPT_LEDGER_ENV 未停用（缺省开）时；按 outcome 组装一行尝试记录（t/outcome/id/resp_id ＋ 非 None 的 content_kind/layer/halted_by/error/rotate_error），阈值>0 且活动账本已达阈值时先经 Rotator.rotate 切分活动账本、再 append_jsonl 追加；轮转失败**不丢账**（本行照记并如实留 rotate_error）；**自身绝不外抛**——out 是 dict 时写 out["attempt_ledger_error"]、否则写 stderr（不静默、不改写写入语义）；
 def _append_attempt(cg, nid, a, outcome, halted_by=None, out=None, error=None):
     """#142② 尝试账本的**唯一写入点**：把一次写入尝试的出口如实落一行（append-only）。
 
@@ -104,6 +125,8 @@ def _append_attempt(cg, nid, a, outcome, halted_by=None, out=None, error=None):
     闸门正常拒绝），记账故障不得把「写入成功」改写成「写入失败」诱使调用方重试 ——
     与本模块 `_commit_visibility` 同口径：如实标记、不静默、不改写语义。
     """
+    if not _attempt_ledger_enabled():
+        return
     try:
         ck = a.get("content_kind")
         lyr = a.get("layer")
@@ -141,6 +164,22 @@ def _append_attempt(cg, nid, a, outcome, halted_by=None, out=None, error=None):
                   % (type(exc).__name__, exc), file=sys.stderr)
 
 
+# 生效条件：cg 可解析出 root 时，返回尝试账本的记录（**归档感知**：先按时间序读全部
+# 归档分片，再读活动文件），limit 为真时只取尾部 limit 条；文件不可读时按空计。
+def attempt_history(cg, limit=100):
+    """尝试账本的读面（issue #212 缺口 4，2026-10-13 DSH 端）。
+
+    为什么必须有它：本账此前**只有写面、没有任何读面**（全仓对 _write_attempts
+    的引用只有写入点与注释）。而轮转把活动文件整份 publish 进归档目录 ⇒
+    **只读活动文件的读面在轮转后看到的是空历史**（不是「最近 N 个分片」，是全部
+    消失）。本函数走 Rotator.read_records，故「轮转与否」对调用方透明；被淘汰的
+    只是超出 keep_shards 的旧分片（有界保留＝设计），不是全部历史。
+    """
+    from .rotate import Rotator
+    return Rotator(cg.root, ATTEMPT_BASENAME, ATTEMPT_ARCHIVE_DIR,
+                   rotate_bytes=_attempt_rotate_bytes()).read_records(limit=limit)
+
+
 
 
 # 生效条件：调用即对 cg 执行 flush()（无脏数据时为 no-op），且仅当该调用抛异常而 out 是 dict 时在 out 写入 "flush_error"，异常本身不外抛；
@@ -168,6 +207,36 @@ def _commit_visibility(cg, out):
 
 # issue #82.3：写入硬上限（全 content_kind 统一）。
 MAX_WRITE_BYTES = 1048576        # 1 MiB
+
+# 生效条件：a['content'] 的 UTF-8 字节数超过 MAX_WRITE_BYTES 时返回超限出口响应体
+# （protocol 形态 gate_hard_reject：WRITE_TRIO + gate/error/verdict/hint），否则返回 None。
+def oversize_response(nid, a):
+    """写入硬上限的**唯一构造点**（issue #212 缺口 1，2026-10-13 DSH 端）。
+
+    缺陷现场：动词面（本模块 execute 入口）判这道闸、工具面（mcp_server 的
+    mdcg_remember）**完全不判** ⇒ 同一内容两条通路结论相反——走 cg(op=write)
+    被硬拒（gate='writelimit_size'），走 mdcg_remember 却 committed=True 落盘
+    （实测 1,048,677 字节）。根因不是「判据写错」，而是「判据 + 字段集」被写了
+    两份、只有动词面那份被接线。本函数把判据与响应体收敛成**一份实现**，两个
+    调用点只传 (nid, a)，故两面读数逐键相等（守卫 W2a 断言这一点）。
+
+    位置口径与动词面一致：按**原始入参**判，不打码后再判——打码只减不增，
+    故本闸不会因打码而漏放。
+    """
+    c = a.get("content") or ""
+    n = len(c.encode("utf-8")) if isinstance(c, str) else 0
+    if n <= MAX_WRITE_BYTES:
+        return None
+    return {"ok": False, "id": nid, "committed": False,
+            "gate": "writelimit_size",
+            "error": "content 超过写入硬上限（issue #82.3）",
+            "bytes": n, "limit": MAX_WRITE_BYTES,
+            "verdict": {"state": "REJECT",
+                        "kind": (a.get("content_kind") or "text"),
+                        "evidence": "content %d 字节 > 上限 %d" % (n, MAX_WRITE_BYTES)},
+            "hint": ("写入被拒（硬上限，不是工具故障）：正文 %d 字节 > 上限 %d 字节。"
+                     "本上限全 content_kind 统一（issue #82.3），重试同样结果——"
+                     "请缩短正文后重写。" % (n, MAX_WRITE_BYTES))}
 
 
 class WritePipeline:
@@ -250,21 +319,14 @@ class WritePipeline:
         # #142①：返回体补齐 id/committed（三键铁律）＋ gate/hint，命中协议声明
         # 形态 gate_hard_reject（protocol.VERB_SPECS["write"]["shapes"]）——
         # 此前该出口只有 ok/bytes/error/limit/verdict，三键缺二、不属任何声明形态。
-        _wc = a.get("content") or ""
-        _wbytes = len(_wc.encode("utf-8")) if isinstance(_wc, str) else 0
-        if _wbytes > MAX_WRITE_BYTES:
-            # #142②：超限出口也是「一次尝试的出口」——落一行尝试账本再原样返回
-            # （响应体逐字节不变：仍命中协议形态 gate_hard_reject）。因响应体改为
-            # 命名返回体 `_over`，本处三键齐由守卫 G4 的 AST 判据覆盖（含命名返回）。
-            _over = {"ok": False, "id": _nid, "committed": False,
-                    "gate": "writelimit_size",
-                    "error": "content 超过写入硬上限（issue #82.3）",
-                    "bytes": _wbytes, "limit": MAX_WRITE_BYTES,
-                    "verdict": {"state": "REJECT", "kind": (a.get("content_kind") or "text"),
-                                "evidence": "content %d 字节 > 上限 %d" % (_wbytes, MAX_WRITE_BYTES)},
-                    "hint": ("写入被拒（硬上限，不是工具故障）：正文 %d 字节 > 上限 %d 字节。"
-                             "本上限全 content_kind 统一（issue #82.3），重试同样结果——"
-                             "请缩短正文后重写。" % (_wbytes, MAX_WRITE_BYTES))}
+        # #212 缺口 1（2026-10-13 DSH 端）：超限判据与响应体**收敛到唯一构造点**
+        # oversize_response——工具面此前完全不过这道闸，根因是「判据 + 字段集」
+        # 各写一份、只有本面被接线。本处改为调用同一份实现，两个面因此逐键相等。
+        # 响应体逐字节不变（仍命中协议形态 gate_hard_reject）；AST 判据覆盖不丢：
+        # 含 gate 的字典字面量 return 落在 oversize_response 内，仍在本文件扫描面内。
+        _over = oversize_response(_nid, a)
+        if _over is not None:
+            # #142②：超限出口也是「一次尝试的出口」——落一行尝试账本再原样返回。
             _append_attempt(cg, _nid, a, ATTEMPT_SHORT_CIRCUIT,
                             halted_by="writelimit_size", out=_over)
             return _over

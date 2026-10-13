@@ -3536,6 +3536,18 @@ def _dispatch(cg, name, args):
         # 铸出同一 id → add 的 upsert 语义静默顶替（返回 committed 却 0 命中）。
         from .mdcg import mint_auto_id
         nid = a.get("node_id") or mint_auto_id(cg)
+        # issue #212 缺口 1（2026-10-13 DSH 端）：**工具面此前完全不过写入硬上限**。
+        # 同一内容走 cg(op=write) 被 writepipe 入口的 MAX_WRITE_BYTES 闸硬拒
+        # （gate='writelimit_size'），走 mdcg_remember 却 committed=True 落盘
+        # （实测 1,048,677 字节）——两通路结论相反，而工具面正是 hooks 自动记忆
+        # 走的通路。处置：在**分支分叉之前**补同一道闸（gated 与直写两条出口共用），
+        # 判据与响应体**不是复制**而是调用动词面的同一实现 oversize_response
+        # ⇒ 两个面拿到的读数逐键相等（守卫 W2a 断言这一点）。
+        # 位置口径：与动词面一致——按**原始入参**判（打码只减不增，不会因打码漏放）。
+        from .writepipe import oversize_response as _oversize212
+        _ov212 = _oversize212(nid, a)
+        if _ov212 is not None:
+            return _ov212
         # issue #93（2026-10-09 DSH 端）：**这条通路此前不过 policy 的 forbidden 规则**。
         # 同样内容走 writepipe（cg(op=write)）会被判 REJECT 或打码，而 mdcg_remember
         # ——hooks 自动记忆走的正是它——直接落盘 ⇒ AKIA / ghp_ / URL 内嵌凭据 /
