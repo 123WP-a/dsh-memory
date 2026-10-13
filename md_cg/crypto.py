@@ -335,11 +335,53 @@ def _envelope_key(tenant, actor):
     return f"{tenant}|{actor}"
 
 
+# 生效条件：root、tenant、actor 为入参；以 identity_fingerprint(tenant, actor) 为目标
+# 指纹，递归 root 下 *.md，正文过 is_encrypted 判为密文块且 enc_id_fp 等于目标指纹即
+# 返回 True，否则 False。
+def _actor_has_ciphertext(root, tenant, actor):
+    """该身份是否**已有密文**（rotate 护栏的判据单点，issue #132 S-1）。
+
+    复用既有单点、不另造扫描逻辑：`nodefile.loads`（节点文件格式解析单点）、
+    `is_encrypted`（密文块识别单点）、`enc_id_fp`（密文块身份指纹取单点）、
+    `identity_fingerprint`（本身份指纹计算单点）。
+
+    「最小可判据」依据：本仓没有「只给 root 就枚举节点文件」的既有单点——MdCG
+    的 _scan_nodes / _node_disk_path 都要实例与索引（crypto→mdcos 会成环），故此处
+    只做最小 IO（递归列 root 下 *.md）；判定本身全部走上列既有单点，绝不另写正则
+    或第二套密文语义。
+    """
+    from . import nodefile
+    fp = identity_fingerprint(tenant, actor)
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith(".md"):
+                continue
+            try:
+                with open(os.path.join(dirpath, fn), "r",
+                          encoding="utf-8", newline="") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            _fm, content = nodefile.loads(raw)
+            if is_encrypted(content) and enc_id_fp(content) == fp:
+                return True
+    return False
+
+
 # 生效条件：root、kek、tenant、actor、clearance="private"、rotate=False 为入参；若 kek 为假抛 LockedError；否则以 FileLock(keys_path(root), strict=True) 持跨进程写锁进入临界区（N184，2026-09-28 第 23 轮：读快照→签发→写回全程持锁，写者互斥——原子替换只防撕裂不防丢失更新，两写者按各自陈旧快照整份写回会无痕抹除对方信封；锁竞争超时经 TimeoutError 转 LockedError fail-closed，绝不无锁放行整份写回）；临界区内加载 keys，keys 带 load_error 损坏标记时抛 LockedError（N139：损坏/漂移回落下静默重签会经 _save_keys 整份覆盖写回并无痕抹除旧信封——旧密文永久不可解）；若 _envelope_key(tenant, actor) 已在 envelopes 中且 rotate 为假则返回 unwrap_dek(root, kek, tenant, actor, clearance)（临界区内互见 → 同身份并发 provision 幂等同 DEK）；否则生成新 DEK 与 nonce，用 aead_encrypt(kek, nonce, dek, _dek_aad(tenant, actor)) 包裹后写入 envelopes[k]，经 _save_keys 写前对账合并并发新增信封（N184 防线纵深）后保存，返回 dek。
-def provision_dek(root, kek, tenant, actor, clearance="private", rotate=False):
+def provision_dek(root, kek, tenant, actor, clearance="private", rotate=False,
+                  force=False):
     """为 (tenant, actor) 生成 / 取回 DEK，用 KEK 包裹后存入 `_keys.json`。
 
-    rotate=True 强制换新密钥（旧密文需先迁移，见 `reencrypt_all`）。
+    rotate=True 强制换新密钥。**本函数不做任何重加密、旧 DEK 不保留**：
+    旧信封被就地替换（经 `_save_keys`），旧 DEK 随返回值丢弃 ⇒ 该身份的
+    **历史密文立即永久不可解**（issue #132 S-1）。
+
+    护栏（默认拒绝）：当该身份**已有历史密文**时，rotate=True 不静默替换，
+    改为返回结构化拒绝体（ok 为假 + 机器可读 error 码），并保证 `_keys.json`
+    逐字节不变；确需覆盖时显式传 force=True（行为与修复前逐位一致）。
+    历史密文判据见 `_actor_has_ciphertext`（复用 `is_encrypted`、`enc_id_fp`、
+    `identity_fingerprint` 三个既有单点）。
     """
     if not kek:
         raise LockedError("无主密钥（KEK）：拒绝签发数据密钥")
@@ -356,6 +398,25 @@ def provision_dek(root, kek, tenant, actor, clearance="private", rotate=False):
             k = _envelope_key(tenant, actor)
             if k in data["envelopes"] and not rotate:
                 return unwrap_dek(root, kek, tenant, actor, clearance)
+            # issue #132 S-1 成因：rotate 是**破坏性**操作——旧信封被就地替换
+            # （data["envelopes"][k] = ... 覆盖）、旧 DEK 随返回值丢弃、从不落盘。
+            # 若该身份**已有历史密文**（正文经该 DEK 密封），换新 DEK 会让那些
+            # 密文**立即永久不可解**，而调用方拿不到任何提示。
+            # 护栏：默认拒绝（fail-closed）——只在**确无历史密文**或调用方显式
+            # force=True 确认覆盖（其行为与修复前逐位一致）时才换新。
+            if (rotate and k in data["envelopes"] and not force
+                    and _actor_has_ciphertext(root, tenant, actor)):
+                return {
+                    "ok": False,
+                    "error": "rotate_would_orphan_ciphertext",
+                    "reason": (
+                        f"{tenant}|{actor} 已有历史密文：rotate=True 会替换其 DEK "
+                        f"信封并丢弃旧 DEK，使既有密文永久不可解。"),
+                    "hint": (
+                        "本函数不做重加密、旧 DEK 不保留。请先用旧 DEK 解开并重加"
+                        "密既有密文（迁移），再轮换；确要接受历史密文不可解时，"
+                        "显式传 force=True。"),
+                }
             dek = secrets.token_bytes(KEY_LEN)
             nonce = secrets.token_bytes(NONCE_LEN)
             ct, tag = aead_encrypt(kek, nonce, dek, _dek_aad(tenant, actor))
@@ -402,9 +463,9 @@ def has_envelope(root, tenant, actor):
 
 
 # 生效条件：root、kek、tenant、actor、clearance="private" 为入参，返回 provision_dek(root, kek, tenant, actor, clearance=clearance, rotate=True)。
-def rotate_dek(root, kek, tenant, actor, clearance="private"):
+def rotate_dek(root, kek, tenant, actor, clearance="private", force=False):
     return provision_dek(root, kek, tenant, actor, clearance=clearance,
-                         rotate=True)
+                         rotate=True, force=force)
 
 
 # 生效条件：root 为入参，遍历 _load_keys(root).get("envelopes") or {} 的每项，按 "|" partition 出 tenant/actor，收集 id_fp、clearance、created_at 后返回列表；无信封时返回 []。
