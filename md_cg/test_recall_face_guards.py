@@ -679,7 +679,14 @@ _MUTATIONS = {
     "H11-slug": (
         "mdcg.py", r"(?m)^\s*return _tasks\.slugify\(raw\)\s*$",
         "        return hashlib.sha1(str(question or \"\").encode()).hexdigest()[:10]",
-        ["S1", "S3"], "工单身份退回内容哈希（措辞一变就另建一张）"),
+        # issue #206 C3（2026-10-13 DSH 端）：期望集补 S4。原写 ["S1","S3"]，
+        # 而该变异**因果上**必然连带打红 S4——身份退回内容哈希后，同一问题
+        # 的新现场算出的 id 与旧工单不同，_refresh_unresolved 找不到同一张单，
+        # 于是**新建**而不是就地刷新，旧数值留在旧单里 ⇒ S4「旧数值不残留」
+        # 必然失败。这不是判据过宽，而是期望集漏列了这条因果链。
+        # 该漏列此前**不可见**：_reds_exact 的返回值被取反绑定（同 C3），
+        # 该变异一直走 else 分支被静默判 ok；绑定修正后才如实报「多打红 S4」。
+        ["S1", "S3", "S4"], "工单身份退回内容哈希（措辞一变就另建一张）"),
     "H11-refresh": (
         "mdcg.py", r"(?m)^\s*fm, old = self\._read\(entry\)\s*$",
         "        return False\n        fm, old = self._read(entry)", ["S4"],
@@ -772,7 +779,13 @@ def _mutate_mode(which):
                 f.write(re.sub(pat, sub, src, count=1))
             r = _run_guard(tmp)
             reds = _reds(r.stdout)
-            missed, why = _reds_exact(reds, want)
+            # issue #206 C3（2026-10-13 DSH 端）：变量名**取反绑定**的修正。
+            # _reds_exact 返回 (是否通过, 明细)，此处原写作 missed, why = ...，
+            # 于是下文的 elif missed: 实际判的是 **ok 为真**——判据**满足**被当
+            # 失败（打印 FAIL 却在理由里写「红项与预期逐项一致」），判据**违反**
+            # 则落到 else 分支被静默通过。一个绑定错误同时产生假红与假绿。
+            # 这正是 issue #206 §C3 报的形态，实测 9 处变异 8 处 FAIL。
+            same, why = _reds_exact(reds, want)
             summary = [l for l in (r.stdout or "").splitlines()
                        if l.startswith("====")]
             print("  [%s] %s" % (name, note))
@@ -785,7 +798,7 @@ def _mutate_mode(which):
                       % (name, r.returncode))
                 print("     stderr: %s" % (r.stderr or "")[-400:])
                 rc = 1
-            elif missed:
+            elif not same:
                 print("  FAIL 变异 %s 红项与预期**不相等**：%s"
                       % (name, why))
                 rc = 1
