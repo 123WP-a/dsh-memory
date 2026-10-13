@@ -87,6 +87,28 @@ CCG_CONTRACT_ROLES = {
     "不适用条件": "拒绝域 rejection_domain",
 }
 
+# ---- issue #218（2026-10-13 DSH 端）：**「验证方式」召回面的真实语义登记** ----
+# 上表给「验证方式」的契约角色是「后置条件 postcondition + test」。本注释登记它
+# 在**召回面**上的实际出口（判据真源 = mdcg.index_key_hits，此处不复制判据，
+# 只登记语义；两处若不一致以 index_key_hits 为准）：
+#
+#   ① term     —— **值敏感**：查询侧展开出的词项（expand_query_terms）与
+#                  「# 验证方式：行切分后的词项」有子串相交即命中。
+#                  可达性取决于**查询**是否含该值，而非值的质量。
+#   ② declared —— **值盲**：is_postcondition_query(查询) 为真且该行切分后
+#                  非空即命中——**任意非空取值（切分后词长 >= ELEMENT_TERM_MIN）**
+#                  产生同一输出。此为**刻意设计**（「声明了验证方式即召回」，与
+#                  rejection_terms 的边界问句同构），不是缺陷。
+#
+# 两条出口经 index_key_hits 的 post_source 字段区分（issue #218 新增）：
+# "term" = 值命中；"declared" = 值未参与判定。
+#
+# **值域控制已有真源，勿另造词表**：VERIFICATION_BASIS（本模块 :121）就是
+# 「验证方式」取值该落的受控词集（compiler/test/measurement/formal_proof/data/
+# textbook/public_kb/other），且已绑定 frontmatter.verification_basis 的写入校验。
+# issue #218 建议的选项 (c)「对取值设词表校验」**不需要新造词表**——需要裁定的是
+# 「召回面是否应据此收紧」，属设计裁定（见该 issue 回复）。
+
 # ---- 裁定 C（Phase 0 契约裁决 · 2026-09-17）：索引元条件与功能生效条件字段分家 ----
 # 病根：codeindex.render 曾把**机械推导的索引元条件**（本地源码仓 / 全时窗 /
 # AST 工具 / 文件可读）写成「生效条件」行，与「功能生效条件」（人工声明：

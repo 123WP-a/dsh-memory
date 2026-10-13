@@ -329,8 +329,21 @@ def g7_legacy_zero_break():
     try:
         old = {"path": "knowledge/k_old.md", "tags": [], "importance": 0.5}
         hits = M.index_key_hits(old, ["其它会话"], "何时不适用")
+        # issue #218（2026-10-13 DSH 端）：本项原为**整字典相等**断言。
+        # #218 在回传体上**新增**了 post_source / reject_source 两个结构化字段
+        # （使「值命中 term」与「仅声明命中 declared」可区分），整字典相等随之
+        # 不再成立。此处不是放宽，而是把两件事**分开钉死**：
+        #   ① 语义（本项原本要保的）：缺键 ⇒ hit/post/reject 全 False、why 空
+        #      —— 即「未重建的旧快照退回旧行为」，逐位不变；
+        #   ② 形状：新增字段存在且为 None（未命中时不谎报出口）。
+        # ②比原来的「整字典相等」更严：它同时约束了新字段的缺省值。
+        _legacy = {k: hits[k] for k in ("hit", "post", "reject", "why")}
         check("条目缺两键 → 判 False（未重建的旧快照退回旧行为）",
-              hits == {"hit": False, "post": False, "reject": False, "why": []},
+              _legacy == {"hit": False, "post": False, "reject": False, "why": []},
+              str(hits))
+        check("条目缺两键 → 新增分支字段存在且为 None（#218 形状约束）",
+              hits.get("post_source") is None
+              and hits.get("reject_source") is None,
               str(hits))
         # `_like` 三参旧签名（旧调用方）行为与改动前一致
         body = BODY.format(n="x", neg="其它会话", t="苹果 章节")

@@ -823,19 +823,34 @@ def index_key_hits(entry, terms, query) -> dict:
     即行为退回改动前（零破坏）。
     """
     e = entry or {}
-    hits = {"hit": False, "post": False, "reject": False, "why": []}
+    # issue #218（2026-10-13 DSH 端）：**分支回传面结构化**。
+    # 本函数此前把「是哪一条出口命中的」只写进 why（字符串列表）——而 why
+    # 的消费者只有守卫（test_p2_six_elements 断言其内容），**检索面与人工裁决面
+    # 都读不到**。于是「验证方式的值真的与查询有关」（term）与「只是声明了验证
+    # 方式」（declared）在回传体上不可区分。
+    # 本改动只**新增**两个结构化字段（判据、hit/post/reject/why 逐位不变）：
+    #   · post_source  : "term" | "declared" | None
+    #   · reject_source: "declared" | None
+    # 取值的**值敏感性**因此可复核：post_source=="term" 才是值命中，
+    # post_source=="declared" 表示值未参与判定（详见 nodefile.CCG_CONTRACT_ROLES
+    # 旁 #218 的登记注释）。
+    hits = {"hit": False, "post": False, "reject": False, "why": [],
+            "post_source": None, "reject_source": None}
     q = str(query or "")
     post = e.get(nodefile.POSTCONDITION_TERMS_KEY) or []
     if post:
         if any(t in " ".join(post) for t in (terms or [])):
             hits["post"] = True
+            hits["post_source"] = "term"
             hits["why"].append("postcondition_terms:term")
         elif is_postcondition_query(q):
             hits["post"] = True
+            hits["post_source"] = "declared"
             hits["why"].append("postcondition_terms:declared")
     rej = e.get(nodefile.REJECTION_TERMS_KEY) or []
     if rej and is_boundary_query(q):
         hits["reject"] = True
+        hits["reject_source"] = "declared"
         hits["why"].append("rejection_terms:declared")
     hits["hit"] = bool(hits["post"] or hits["reject"])
     return hits
