@@ -413,10 +413,18 @@ def _gate_audit(ctx):
         tags = a.get("tags")
         if isinstance(tags, (list, tuple)):
             tags = [audit.redact_forbidden(t) if isinstance(t, str) else t for t in tags]
+        # issue #214：调用方**声明的密级**必须原样透传——与同函数的 DEFER 出口
+        # （:423-427，#186 已修）和 ACCEPT 落盘面（:766-773，B2 已修）同口径。
+        # 此前不传 ⇒ MdCGSecure.add_rejected 取 DEFAULT_SENSITIVITY=internal，
+        # 声明 private 的正文前 200 字以**明文**写进 rejected/rej_*.md，无令牌
+        # 访客经 stg(op=timeline) / cg(op=read, node_id) / mdcg_get 三处可读；
+        # 回执还写着「本条未入库」，写入方不会察觉。
+        # 未声明（None）时行为不变：仍按 internal（#87 已裁的缺省）。
         rid = cg.add_rejected(audit.redact_forbidden(a.get("content") or "")[:200],
                               verdict["evidence"],
                               verification_basis=verdict.get("basis") or "test",
-                              tags=tags)
+                              tags=tags,
+                              sensitivity=a.get("sensitivity"))
         return {"ok": False, "id": rid, "committed": False,
                 "moved_to": "rejected", "verdict": verdict,
                 "hint": _reject_hint(verdict)}

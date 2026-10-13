@@ -5182,9 +5182,15 @@ class MdCG:
             protect.guard_forget(self, node_id, override=override,
                                  actor=getattr(self, "actor", None))
             # 移入 rejected：负记忆化
+            # issue #214（同根出口）：证伪存根取**原节点 frontmatter 的密级**。
+            # 不传 ⇒ 按 internal 明文落盘：一个 private 节点被证伪后，其正文前
+            # 200 字反而变成 internal 明文——「删掉的比留下的更泄露」。
+            # （#144 收口时曾列为未纳入的改进项。）
             self.add_rejected(hypothesis=node["content"][:200],
                               reason=evidence,
-                              verification_basis="test")
+                              verification_basis="test",
+                              sensitivity=(node.get("frontmatter") or {})
+                              .get("sensitivity"))
             # 从原位置删除（节点进入 rejected 层）——**走软删单点**，与 forget
             # 同一条可恢复路径：MdCGOS._forget_apply（节点文件移入 trash/ +
             # 写删除清单 + _unstage 摘索引）。此前这里是 os.remove **硬删**
