@@ -100,8 +100,25 @@ def node_id(root: str = None, explicit: str = None) -> str:
     优先 `MDCG_NODE_ID`（生产环境应显式设置，保证跨机器稳定）；
     缺省从根路径派生 `node-<12hex>`（同机可复现，跨机器不保证唯一）。
     """
-    nid = (explicit or os.environ.get(NODE_ID_ENV) or "").strip()
+    # issue #277 类型闸**先于 .strip()**：旧写法 (explicit or env or "").strip()
+    # 在 explicit=123 这类非字符串上会漏成 AttributeError（int 没有 strip），
+    # 既不是 fail-closed 的错误类、调用方也无法按类型判空。
+    # 语义保持：假值 explicit 仍回落环境变量；空串仍是「未提供」⇒ 走派生。
+    raw = explicit or os.environ.get(NODE_ID_ENV)
+    if raw is not None and not isinstance(raw, str):
+        raise EvidenceError(
+            f"证据节点 id 必须是字符串：{raw!r}（{type(raw).__name__}）")
+    nid = (raw or "").strip()
     if nid:
+        # issue #277：本值是**模型/环境可控输入**，而 publish_card 会把它直接
+        # 拼进 os.path.join(peers_dir(swarm), nid + ".json")——"../" 可穿越出
+        # swarm 目录（实测 MDCG_NODE_ID="../../../evil_pwned" 在 swarm 外落盘）。
+        # 旧实现只 strip、零校验 ⇒ 任意文件写。此处**先拦后拼**（同 #147 的
+        # 「汇点兜底」与 mdcos._restore_id_ok 的「先拦后读」纪律）：
+        # 判据与写面 add() 的 P0-1 白名单**同源**，不是第二份判据。
+        err = _node_id_error(nid)
+        if err:
+            raise EvidenceError(err)
         return nid
     r = _root_of(root)
     if not r:
@@ -164,7 +181,22 @@ def publish_card(root: str = None, *, swarm: str = None,
                  subsystem: str = SUBSYSTEM, signers_file: str = None) -> dict:
     """把本节点名片写入共享目录 `peers/<node_id>.json`（0600）。"""
     c = card(root, subsystem=subsystem, signers_file=signers_file)
+    # issue #277 **汇点兜底**（同 #147 的 write_pack 纪律）：即使调用方绕过
+    # node_id() 直接构造 card，恶意 node_id 也一律 fail-closed——不静默落盘。
+    err = _node_id_error(c.get("node_id"))
+    if err:
+        raise EvidenceError(err)
+    base = os.path.realpath(peers_dir(swarm))
     p = os.path.join(peers_dir(swarm), c["node_id"] + ".json")
+    # realpath 归一后判包含性：拒 ../ 穿越、绝对路径、盘符、UNC、空字节
+    # （白名单已挡住这些形态，此处是**第二道**，防白名单将来被放宽）。
+    try:
+        real = os.path.realpath(p)
+    except ValueError as exc:                    # 空字节等非法字符
+        raise EvidenceError(f"名片归档路径非法：{exc}")
+    if real != base and not real.startswith(base + os.sep):
+        raise EvidenceError(
+            f"名片归档路径越界（必须落在 peers 目录内）：{p!r}")
     _write_json(p, c)
     return {"ok": True, "file": p, "card": c}
 
@@ -341,6 +373,27 @@ def _read_pack(src) -> dict:
 
 
 # 生效条件：pid 为 pack["pack_id"]（任意类型）；合规返回空字符串，否则返回中文理由——非 str/空、超 PACK_ID_MAX、含 PACK_ID_OK 之外字符、以点开头或含连续两点各一条。**单一真源**：_validate 与 write_pack 汇点共用本函数，规则只有一份。
+def _node_id_error(nid) -> str:
+    """node_id 白名单判据（issue #277）。
+
+    判据与写面 MdCG.add() 的 P0-1 白名单**同源**（同一 _NODE_ID_RE、同一
+    ".." 禁令、同一 _NODE_ID_FORBIDDEN），不是第二份判据——避免两套口径漂移。
+    空串返回错误文案（调用方已 strip 过，空串即「未提供」）。
+    """
+    from .mdcg import _NODE_ID_RE, _NODE_ID_FORBIDDEN
+    if not isinstance(nid, str) or not nid:
+        return f"证据节点 id 必须是非空字符串：{nid!r}"
+    if len(nid) > 128:
+        return f"证据节点 id 过长：{len(nid)} > 128"
+    if ".." in nid:
+        return f"证据节点 id 形似路径穿越（拒 ..）：{nid!r}"
+    if nid in _NODE_ID_FORBIDDEN:
+        return f"证据节点 id 是保留字：{nid!r}"
+    if not _NODE_ID_RE.match(nid):
+        return (f"证据节点 id 含非法字符（须匹配 {_NODE_ID_RE.pattern}）：{nid!r}")
+    return ""
+
+
 def _pack_id_error(pid) -> str:
     """pack_id 白名单判据（issue #147）。"""
     if not isinstance(pid, str) or not pid:
