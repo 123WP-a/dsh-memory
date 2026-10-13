@@ -39,6 +39,7 @@
 #           FixReport 的 gaps）；负覆盖条目在 MCP 结果面的呈现（`_node_view` 只透
 #           id/path/frontmatter/content）不在本文件面内，属调用方渲染层。
 import hashlib
+import ast
 import inspect
 import os
 import re
@@ -296,9 +297,43 @@ def group_c():
     # ---- 真源单点（2026-09-30 补强）：生产路径不留同值字面量副本 ----
     # mdcos._candidates 旧写作裸元组 ("rejected","unresolved","goals")——与 mdcg 的
     # NEG_ROUTE_LAYERS 同值异构：改一处漏一处，正是 C 组「同口径」要防的漂移。
-    check("C6 生产路径（mdcos）不留负层元组字面量副本",
-          '("rejected", "unresolved", "goals")' not in inspect.getsource(mdcos),
-          "mdcos.py 仍有字面量副本")
+    #
+    # issue #213 Q4（2026-10-13 DSH 端）：原 C6 是**否定**断言——「字面量不在
+    # 源码里」。该字面量在 HEAD 上**已不存在**（实测 0 处），故它**已恒真**：
+    # 无论后续怎么改都不会再转红，对未来的漂移**没有区分力**；且只认一种拼法，
+    # 换个引号 / 空白 / 换成 list 都能绕过。
+    # 按 Q4 的建议改建为**正向**断言：真源必须被**真的读到**——若有人把
+    # _candidates 里的 NEG_ROUTE_LAYERS 换回字面量，本断言立刻转红。
+    # 负向面同时**加宽**为跨引号/空白形态的正则（补回原断言的覆盖意图）。
+    # 判据走 **AST**，不用「源码里有这个字符串」——后者会被**注释**满足：
+    # _candidates 内本就有一条注释写着「真源 mdcg.NEG_ROUTE_LAYERS」（实测：
+    # 把代码里的引用换成字面量后，字符串判据仍为真 ⇒ 无判别力）。
+    # AST 只看**名字引用**，注释与字符串一律不计。
+    # 直接走源码文件里那个 ClassDef/FunctionDef 节点——不经 getsource + 反缩进，
+    # 免得为了去掉类内缩进引入文本处理（文本处理会把判据绑到缩进形态上）。
+    _cand_node = None
+    _mdcos_py = os.path.join(os.path.dirname(os.path.abspath(mdcos.__file__)),
+                             "mdcos.py")
+    with open(_mdcos_py, encoding="utf-8") as _fh:
+        _tree = ast.parse(_fh.read())
+    for _c in _tree.body:
+        if isinstance(_c, ast.ClassDef) and _c.name == "MdCGOS":
+            for _f in _c.body:
+                if isinstance(_f, ast.FunctionDef) and _f.name == "_candidates":
+                    _cand_node = _f
+    check("C6 前置：在 mdcos.py 的 MdCGOS 里找到 _candidates 定义",
+          _cand_node is not None)
+    _cand_names = ({n.id for n in ast.walk(_cand_node)
+                    if isinstance(n, ast.Name)} if _cand_node else set())
+    check("C6 _candidates 真的读真源 NEG_ROUTE_LAYERS（AST 正向断言）",
+          "NEG_ROUTE_LAYERS" in _cand_names,
+          "mdcos.MdCGOS._candidates 未按名字引用 NEG_ROUTE_LAYERS（实际引用：%s）"
+          % sorted(_cand_names)[:8])
+    check("C6b mdcos 源码不留三名负层字面量（任何引号/空白形态）",
+          not re.search(r"""[([\s]*['"]rejected['"]\s*,\s*['"]unresolved['"]"""
+                        r"""\s*,\s*['"]goals['"]\s*[)\]]""",
+                        inspect.getsource(mdcos)),
+          "mdcos.py 仍有负层三元组字面量副本")
     check("C7 MdCGOS 与基类共用同一常量对象（导入非同值重写）",
           mdcos.NEG_ROUTE_LAYERS is _mdcg.NEG_ROUTE_LAYERS,
           "%r vs %r" % (mdcos.NEG_ROUTE_LAYERS, _mdcg.NEG_ROUTE_LAYERS))

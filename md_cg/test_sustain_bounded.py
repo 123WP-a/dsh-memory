@@ -311,8 +311,36 @@ def t3():
        and "RuntimeError: t3-fail-once" in lp.last_tick_error.get("error", ""),
        "T3c  异常**不再全静默**：last_tick_error 记 {档名, 类名+摘要}",
        lp.last_tick_error)
-    ok(lp.last_tick_done is not None and lp.last_tick_done.get("ok") is False,
-       "T3d  last_tick_done 记 ok=False（失败档）", lp.last_tick_done)
+    # issue #213 Q9（2026-10-13 DSH 端）：原 T3d 断言「最近一档 == 失败档」，
+    # 即 last_tick_done.get("ok") is False——该断言**结构性竞态**，不是负载敏感。
+    # 机理：_run 是**单线程顺序**执行（beat→heal→scrub→evolve→tidy→sleep，
+    # 固定次序，同一轮内逐个判到期）。heal(0.15s) 与 scrub(0.3s) 同轮到期时，
+    # **scrub 必然在 heal 之后写 last_tick_done**，把 heal 的 ok=False 覆盖成
+    # ok=True。故最后一档是 heal 还是 scrub，只取决于 stop() 落在哪——
+    # 实测扫 14 个 stop 时刻，**6 个失败**（0.5/0.6/0.9/1.0/1.3/1.4s）。
+    # 更正原判读：「残留的 scrub 任务抢先落 ok=True」不成立——**没有第二个任务**，
+    # 循环里各档就是同一线程按序跑的；错的不是执行体，是断言把「最后一档必为
+    # heal」当成了不变式，而循环从不保证这一点。
+    # 改法：钉**可从日志交叉核验**的不变式——last_tick_done 必须等于日志里最后
+    # 跑过的那一档，且 ok 必须与该档真实结局一致（heal 必失败、scrub 必成功）。
+    # 判别力不降反升：错配 / 漏记 / ok 翻转都会转红；且不再依赖 stop 时刻。
+    _last_name = log[-1][0] if log else None
+    _ltd = lp.last_tick_done
+    ok(_ltd is not None and _ltd.get("name") == _last_name,
+       "T3d  last_tick_done 与最后跑过的一档一致（%s）" % _last_name, _ltd)
+    ok(_ltd is not None and _ltd.get("ok") is (_last_name != "heal"),
+       "T3d2 ok 与该档真实结局一致（heal 必失败 ⇒ ok=False）", _ltd)
+    # 失败档「不静默」的**无条件**判据（不依赖调度次序）：直接驱动一档必失败的
+    # wrapped tick，出口必须落 ok=False——原 T3d 想钉的就是这条，此处确定性钉死。
+    lp._wrap_ticks()
+    def _boom():
+        raise RuntimeError("t3-direct")
+    lp._wrap_tick("heal", _boom)()
+    ok(lp.last_tick_done is not None
+       and lp.last_tick_done.get("name") == "heal"
+       and lp.last_tick_done.get("ok") is False,
+       "T3d3 失败档出口必记 ok=False（确定性：直接驱动，不依赖调度）",
+       lp.last_tick_done)
 
 
 # ---------------------------------------------------------------- T4
