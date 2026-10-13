@@ -704,6 +704,25 @@ def _reds(stdout):
     return out
 
 
+def _reds_exact(reds, want):
+    """变异红项的**精确**判据（issue #182）：与孪生守卫
+    `md_cg/test_c8_search_rrf_gates.py` 的 `len(reds) == expect` 同形——
+    reds 必须与期望红项集**完全相等**：多打红的（该处变异打红的面比预期更宽）
+    与未打红的同样判失败；只做包含判据会把前者静默吞掉。
+
+    返回 (是否通过, 不相等处的明细)。
+    """
+    ok = (set(reds) == set(want))
+    missing = sorted(set(want) - set(reds))
+    extra = sorted(set(reds) - set(want))
+    why = []
+    if missing:
+        why.append("未打红预期断言：%s" % " ".join(missing))
+    if extra:
+        why.append("多打红非预期断言：%s" % " ".join(extra))
+    return ok, "；".join(why) or "（红项与预期逐项一致）"
+
+
 def _md5(path):
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
@@ -753,7 +772,7 @@ def _mutate_mode(which):
                 f.write(re.sub(pat, sub, src, count=1))
             r = _run_guard(tmp)
             reds = _reds(r.stdout)
-            missed = [w for w in want if w not in reds]
+            missed, why = _reds_exact(reds, want)
             summary = [l for l in (r.stdout or "").splitlines()
                        if l.startswith("====")]
             print("  [%s] %s" % (name, note))
@@ -767,7 +786,8 @@ def _mutate_mode(which):
                 print("     stderr: %s" % (r.stderr or "")[-400:])
                 rc = 1
             elif missed:
-                print("  FAIL 变异 %s 未打红预期断言：%s" % (name, missed))
+                print("  FAIL 变异 %s 红项与预期**不相等**：%s"
+                      % (name, why))
                 rc = 1
             else:
                 print("  ok   变异 %s 打红预期断言 %d 项" % (name, len(want)))
