@@ -62,6 +62,12 @@ if _REPO not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from md_cg import autonomy_modes as _am        # noqa: E402
+
+#: 档位 env 的键名一律取自唯一入口模块（仓内惯例，见 test_autonomy_modes）——
+#: test_autonomy_modes 的 G 组全仓扫描「带引号的档位 env 名只许出现在
+#: autonomy_modes.py」，在测试里写死该字面量会打红那条反漂移判据。
+_ENV_MODE = _am.AUTONOMY_ENV_KEYS["mode"]
 from md_cg import mcp_server                   # noqa: E402
 from md_cg import mdcg as _mdcg                # noqa: E402
 from md_cg.mdcos import MdCGSecure             # noqa: E402
@@ -145,7 +151,10 @@ def s1():
 
 def s2():
     print("== S2 ★ 直写档：同 id 改写不带 sensitivity ==")
-    os.environ["MDCG_AUTONOMY"] = "full"
+    # 档位字面量一律取自唯一入口模块 autonomy_modes——test_autonomy_modes 的
+    # G 组全仓扫描「带引号的档位 env 字面量只许出现在 autonomy_modes.py」，
+    # 在测试里硬编码档位串会打红那条反漂移判据（本件首轮实测即此）。
+    os.environ[_ENV_MODE] = _am.MODE_FULL
     d = _cg("designer", "secret", session="s2")
     mcp_server._dispatch(d, "mdcg_remember", {"node_id": "p1",
         "content": "PRIV-A1 原文 银行卡密码是生日", "layer": "knowledge",
@@ -166,7 +175,7 @@ def s2():
 
 def s3():
     print("== S3 ★ 缺省 confirm 档：变更单 → accept ==")
-    os.environ.pop("MDCG_AUTONOMY", None)          # 缺省档 = confirm
+    os.environ.pop(_ENV_MODE, None)                # 缺省档 = confirm
     d = _cg("designer", "secret", session="s3")
     mcp_server._dispatch(d, "mdcg_remember", {"node_id": "p2",
         "content": "PRIV-C3 原文 护照号", "layer": "knowledge",
@@ -200,7 +209,7 @@ def s3():
 
 def s4():
     print("== S4 新写入面零变化 ==")
-    os.environ["MDCG_AUTONOMY"] = "full"
+    os.environ[_ENV_MODE] = _am.MODE_FULL
     d = _cg("designer", "secret", session="s4")
     mcp_server._dispatch(d, "mdcg_remember", {"node_id": "n1",
         "content": "普通新节点正文", "layer": "knowledge"})
