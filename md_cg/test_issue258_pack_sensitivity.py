@@ -260,9 +260,13 @@ def s6():
            res.get("skipped_reasons"))
     _check("S6d ★ 接收方盘上无明文（未降级落盘）",
            _plaintext_files(B) == [], _plaintext_files(B))
+    # ★ list(...) 快照：本仓 md_cg/test_h4_sustain_snapshot.py 的 G1a 判据扫描
+    # **全 md_cg 域（含测试模块）**，凡从 cg.index 取回的 nodes 一律要求先取
+    # 快照（并发写索引时裸迭代会 RuntimeError: dictionary changed size）。
+    # 项目方本件首版漏了这一处，被该守卫当场打红——记此以免复犯。
     _check("S6e 接收方索引无该节点",
            not any("xnode" in k for k in
-                   (cgB.index.get("nodes") or {})))
+                   list(cgB.index.get("nodes") or {})))
 
 
 def s7():
