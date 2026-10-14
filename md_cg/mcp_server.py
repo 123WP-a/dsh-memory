@@ -2088,6 +2088,34 @@ def _gate_link_signers_file(a):
                          % (cur, sf))
 
 
+def _gate_link_swarm(a):
+    """issue #245：swarm 由调用方指定 = 调用方自选「跨节点共享目录」。
+
+    该值被 `peers_dir`/`inbox_dir` 直接 `os.path.join` 当作**写盘根**
+    （`publish_card`/`write_pack`/`_rejected.jsonl`），传绝对路径或 `../`
+    即可在记忆库之外建目录写文件。
+
+    ★ 既有的 realpath 兜底（#147 的 write_pack、#277 的 publish_card）
+    **兜不住**：那些判据的基准 `base = os.path.realpath(peers_dir(swarm))`
+    本身由 `swarm` 派生 ⇒ `real.startswith(base)` 恒真，是自证同义反复。
+    故收口必须在**入口**，不能靠汇点。
+
+    收口：只接受运维侧现行共享目录（realpath 归一）；未传则行为逐位不变。
+    """
+    sw = a.get("swarm")
+    if not sw:
+        return                       # 未传 → 行为逐位不变（缺省/环境变量）
+    if not isinstance(sw, str):
+        raise ValueError("link: swarm 必须是字符串路径，收到 %r（%s）"
+                         % (sw, type(sw).__name__))
+    from . import evidence as _ev
+    cur = _ev.swarm_dir()
+    if os.path.realpath(os.path.expanduser(sw)) != os.path.realpath(
+            os.path.expanduser(cur)):
+        raise ValueError("link: swarm 只能指向现行共享目录（%s），收到 %s"
+                         % (cur, sw))
+
+
 def _import_subsystem_gate(a, ev):
     """issue #167：import 不得挑一个**更松**的子系统策略来验签。
 
@@ -2148,6 +2176,7 @@ def _cg_dispatch(cg, a):
         act = (a.get("action") or "ls").strip().lower()
         _actor = _p.actor if _p is not None else "system"
         _gate_link_signers_file(a)
+        _gate_link_swarm(a)
         if act == "catalog":
             return _lk.catalog()
         if act == "ls":
