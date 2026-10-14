@@ -5783,10 +5783,72 @@ class MdCGSecure(MdCGOS):
 
     # ---------- 写：权限校验 ----------
 
-# 生效条件：sens 取 sensitivity or DEFAULT_SENSITIVITY，先 _rank(sens) 并 principal.require_layer_write(layer, sens)，再 _attribution(kw, sens)（会话归因走三态解析）后转 super().add（并把**原始声明** sensitivity 以 declared_sensitivity 键并传，供库层落盘闸判「声明↔落盘」一致性；未声明时为 None），最后按下发的 nid 调 _index_sensitivity 并返回 nid。
+# 生效条件：declared 为真值时原样返回（显式声明优先，仍由库层落盘闸判「声明↔落盘」一致性）；declared 为假值且 node_id 有既有节点时返回其密级（索引快照优先、缺条目回读节点文件）；declared 为假值且无既有节点、也未被判为坏节点隔离（self._quarantined）时返回 DEFAULT_SENSITIVITY；既有节点存在而密级判不了（损坏/非法/读不出）或被隔离时抛 AccessDenied（fail-closed，不回落缺省档）。
+    def _write_sensitivity(self, node_id, declared):
+        """写面密级解析单点（issue #297）：未声明则**继承既有节点密级**。
+
+        病象：`add`/`propose` 此前一律 `sensitivity or DEFAULT_SENSITIVITY`。
+        而 `MdCG.add` 是**全量重建 fm**——层位（N221）、生命周期状态、检验强度、
+        验证态、依赖、双时间轴都逐列显式继承了，密级却是唯一没接继承的那一列。
+        于是同 id 改写既有 private 节点、调用方不重传 sensitivity（LLM 代理更新
+        记忆时通常不带）时，节点被重建为 `internal` **明文**落盘，无令牌访客
+        `cg(op=read)` 即可读到新正文；缺省 `MDCG_AUTONOMY=confirm` 档下变更单
+        记录与 accept 回执里的 sensitivity 也已是 internal，**全程无降密级提示**。
+
+        口径（与仓内既有继承语义同向，「显式传入优先；否则取旧值」）：
+          · 显式声明 → 原样返回。主动改密级是合法动作，仍走
+            `_check_sensitivity_landing` 的「声明↔落盘」一致性闸；
+          · 未声明 + **无既有节点** → `DEFAULT_SENSITIVITY`（新写入面零变化）；
+          · 未声明 + **有既有节点** → 继承其密级；
+          · 未声明 + 有既有节点而密级**判不了**（值非法 / 读不出）→ fail-closed
+            抛 `AccessDenied`，不静默回落明文档（与 #164「判不了不生成」同口径）。
+
+        取既有密级优先**索引快照**（元数据明文，免读盘/免解密），索引无条目才回读
+        节点文件——与 `MdCG.add` 取 prev_entry/prev_state 的同一顺序（索引陈旧
+        时靠回读兜底，不把「本进程没这条」当成「库里没这条」）。
+
+        判据面只读密级、**不改**任何状态：本方法不落盘、不动索引、不建目录。
+        """
+        if declared:
+            return declared
+        try:
+            prev = subgraph.node_sensitivity(self, node_id)
+        except AccessDenied:
+            raise
+        except Exception as exc:                       # noqa: BLE001
+            raise AccessDenied(
+                "写入 %r 未声明 sensitivity，而既有节点密级读不出来（%s）——"
+                "fail-closed 拒绝，不回落缺省档（issue #297）"
+                % (node_id, exc)) from exc
+        if prev:
+            return prev
+        # prev 为假有三种成因、后果相反，必须区分（不区分就是本件的病象）：
+        #   ① 真无此节点 → 新写，回落缺省档（新写入面零变化）；
+        #   ② 有节点但密级非法/读不出 → fail-closed；
+        #   ③ 该 id 已被判为**坏节点隔离**（#146）→ 盘面有文件、索引与读面都没有
+        #      → 密级判不了 → fail-closed（隔离它的理由正是「密级坏掉的节点若被
+        #      当默认档消费，等于静默降级为明文」，写面按缺省档写就是同一件事）。
+        try:
+            exists = bool(self.get(node_id))
+        except Exception:                              # noqa: BLE001
+            exists = True                              # 读不出来＝判不了 ⇒ fail-closed
+        if not exists:
+            _q = (getattr(self, "_quarantined", None) or {}).get(node_id)
+            if not _q:
+                return DEFAULT_SENSITIVITY
+            raise AccessDenied(
+                "写入 %r 未声明 sensitivity，而该 id 已被判为坏节点隔离"
+                "（%s：%s）——密级判不了，fail-closed 拒绝；若确认要按某档"
+                "写入，请显式声明 sensitivity（issue #297）"
+                % (node_id, _q.get("path"), _q.get("reason")))
+        raise AccessDenied(
+            "写入 %r 未声明 sensitivity，而既有节点密级判不了（缺/非法）——"
+            "fail-closed 拒绝，不回落缺省档（issue #297）" % (node_id,))
+
+# 生效条件：调用方未声明 sensitivity 时先经 _write_sensitivity 解析出 sens（issue #297：既有节点**继承旧密级**、新节点回落 DEFAULT_SENSITIVITY、既有节点密级判不了则 fail-closed 抛 AccessDenied），再 _rank(sens) 并 principal.require_layer_write(layer, sens)，再 _attribution(kw, sens)（会话归因走三态解析）后转 super().add（并把**原始声明** sensitivity 以 declared_sensitivity 键并传，供库层落盘闸判「声明↔落盘」一致性；未声明时为 None），最后按下发的 nid 调 _index_sensitivity 并返回 nid。
     def add(self, node_id: str, content: str, layer: str = "knowledge",
             sensitivity: str = None, **kw) -> str:
-        sens = sensitivity or DEFAULT_SENSITIVITY
+        sens = self._write_sensitivity(node_id, sensitivity)
         _rank(sens)
         self.principal.require_layer_write(layer, sens)
         self._attribution(kw, sens)
@@ -5818,9 +5880,9 @@ class MdCGSecure(MdCGOS):
         self._index_sensitivity(nid, sens)
         return nid
 
-# 生效条件：sens 取 sensitivity or DEFAULT_SENSITIVITY，先 principal.require_layer_write(kw.get("layer", "knowledge"), sens)（缺省与基类 MdCGOS.propose 的 layer="knowledge" 一致——此前误用 or "contextual" 导致校验层与落盘层错位：knowledge-only 身份被误拒 / contextual-only 身份入队成死提案，2026-09-25 缺陷 #5），再转 super().propose(node_id, content, sensitivity=sens) 并返回其结果。
+# 生效条件：调用方未声明 sensitivity 时先经 _write_sensitivity 解析出 sens（issue #297：既有节点**继承旧密级**——缺省 confirm 档下提案记录若在入队时就已降成 internal，accept 只会照抄该值，故继承必须发生在这里、不能只补落盘面），再 principal.require_layer_write(kw.get("layer", "knowledge"), sens)（缺省与基类 MdCGOS.propose 的 layer="knowledge" 一致——此前误用 or "contextual" 导致校验层与落盘层错位：knowledge-only 身份被误拒 / contextual-only 身份入队成死提案，2026-09-25 缺陷 #5），再转 super().propose(node_id, content, sensitivity=sens) 并返回其结果。
     def propose(self, node_id: str, content: str, sensitivity: str = None, **kw):
-        sens = sensitivity or DEFAULT_SENSITIVITY
+        sens = self._write_sensitivity(node_id, sensitivity)
         self.principal.require_layer_write(kw.get("layer", "knowledge"), sens)
         return super().propose(node_id, content, sensitivity=sens, **kw)
 
