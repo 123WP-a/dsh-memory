@@ -437,6 +437,8 @@ TOOLS = [
                           exclude=_p("string", "check：排除自身节点 id"),
                           depth=_p("integer", "check：递归反思深度上限"),
                           auto_flywheel=_p("boolean", "check：冲突时自动投递飞轮"),
+                          sensitivity=_p("string",
+                                         "check：待写内容声明的密级（透传飞轮建单）"),
                           limit=_p("integer", "check 扫描上限 / history 条数")),
     },
     {
@@ -1285,7 +1287,11 @@ def _consistency_call(cg, a):
             tags=a.get("tags"), exclude=a.get("exclude"),
             limit=int(a.get("limit") or consistency.MAX_SCAN),
             depth=int(depth) if depth is not None else consistency.MAX_DEPTH,
-            auto_flywheel=bool(a.get("auto_flywheel")))
+            auto_flywheel=bool(a.get("auto_flywheel")),
+            # issue #294：check 面也要能声明密级——否则
+            # mdcg_consistency(action=check, auto_flywheel=true) 的调用方
+            # 无从告诉飞轮「这段正文是 private 的」，同一条出口照旧泄明文。
+            sensitivity=a.get("sensitivity"))
     if act == "history":
         return {"records": cg.consistency_history(limit=int(a.get("limit") or 100))}
     if act == "stats":

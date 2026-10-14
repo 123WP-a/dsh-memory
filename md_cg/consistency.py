@@ -537,7 +537,7 @@ def _recursive_reflect(cg, seeds, tw_pos, tw_neg, max_depth=MAX_DEPTH,
 def check(cg, content, layer=None, condition_space=None,
           non_applicable_conditions=None, tags=None, exclude=None,
           limit=MAX_SCAN, depth=MAX_DEPTH, auto_flywheel=False,
-          query=None, log_write=True):
+          query=None, log_write=True, sensitivity=None):
     """节点间自动冲突检测（L0 情绪 → L1 反思 → L2 递归反思）。
 
     返回完整判据（可审计）：
@@ -875,7 +875,8 @@ def check(cg, content, layer=None, condition_space=None,
     # 固化成工单 unr_9af4803381）。判定本身照旧返回，缺的只是「自动建单」。
     if auto_flywheel and verdict in FLYWHEEL_TRIGGERS:
         rec["unresolved_id"] = _fire_flywheel(cg, query or content, verdict,
-                                              reason, missing, allc)
+                                              reason, missing, allc,
+                                              sensitivity=sensitivity)
     if log_write:
         log(cg, rec)
     return rec
@@ -896,20 +897,34 @@ def _missing_text(missing):
 
 
 # 生效条件：cg 提供可调用 flywheel_step 时，以 query（假值按空串）前 200 字符、verdict、missing 文本（空则 reason）、conflicts 非 None 则作 detail 否则 missing 调用；结果 dict 的 unresolved_id 真值时返回它，否则回落 id；无 flywheel_step 或异常返回 None；
-def _fire_flywheel(cg, query, verdict, reason, missing, conflicts=None):
+def _fire_flywheel(cg, query, verdict, reason, missing, conflicts=None,
+                   sensitivity=None):
     """把冲突作为「误差」投给知识飞轮，返回 unresolved 条目 id（失败不阻塞写入）。
 
     conflicts：冲突现场（含 type / with / same_condition 等数值），供下游生成
     `# 现场：`；missing 只描述「缺什么」，不带现场，故两者都要送。
+
+    sensitivity（issue #294，2026-10-14）：调用方写入声明的密级，**必须**随
+    payload 下传。修前这里不带密级，而 payload 里的 query 是**调用方正文前
+    200 字**，飞轮据此建的 unresolved 工单便按缺省档 internal 明文落盘——
+    一条声明 private 的写入被判 REJECT 后，属主只收到「冲突拒绝」，正文却
+    以明文出现在工单正文、**文件名（id 由正文 slug 而来）**、`_index.json`
+    与 `_audit.jsonl` 里，无令牌访客 `stg(op=timeline)` + `mdcg_get` 即可读。
+    缺省 None＝调用方未声明（按 #87 走 internal，零变化）。
     """
     step = getattr(cg, "flywheel_step", None)
     if step is None:
         return None
     try:
-        r = step({"query": (query or "")[:200], "expected_state": "ACCEPT",
-                  "actual_state": verdict,
-                  "missing": _missing_text(missing) or reason,
-                  "detail": conflicts if conflicts is not None else missing})
+        payload = {"query": (query or "")[:200], "expected_state": "ACCEPT",
+                   "actual_state": verdict,
+                   "missing": _missing_text(missing) or reason,
+                   "detail": conflicts if conflicts is not None else missing}
+        # 只在真声明时带键：缺省写入面（未声明密级）payload 逐键不变，
+        # 下游 flywheel_step 的缺键回落路径照旧。
+        if sensitivity:
+            payload["sensitivity"] = sensitivity
+        r = step(payload)
         if isinstance(r, dict):
             return r.get("unresolved_id") or r.get("id")
     except Exception:

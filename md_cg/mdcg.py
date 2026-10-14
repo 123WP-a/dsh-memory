@@ -2573,7 +2573,11 @@ class MdCG:
             vd = _cons.check(self, content, layer=layer,
                              condition_space=condition_space,
                              non_applicable_conditions=non_applicable_conditions,
-                             tags=tags, exclude=node_id, auto_flywheel=True)
+                             tags=tags, exclude=node_id, auto_flywheel=True,
+                             # issue #294：extra["sensitivity"] 是**归一后的
+                             # 落盘值**（MdCGSecure.add 算出，含 #297 的既有
+                             # 密级继承），正是飞轮该沿用的那个值。
+                             sensitivity=extra.get("sensitivity"))
             v = vd["verdict"]
             if v == "REJECT" and on_conflict == "reject":
                 raise _cons.ConsistencyError(v, vd["reason"], vd["conflicts"])
@@ -5342,6 +5346,22 @@ class MdCG:
         try_data = json.loads(error_report) if isinstance(error_report, str) else error_report
         _q = try_data.get('query', '?')
         _st = try_data.get('actual_state', '?')
+        # issue #294（2026-10-14）：调用方声明的密级。修前这一跳把 payload 原样
+        # 用掉，工单便按 add_unresolved 的缺省档 internal 明文落盘。缺省 None＝
+        # 调用方未声明，走 #87 的 internal，**逐键不变**（零变化面）。
+        _sens = try_data.get("sensitivity")
+        _topic = f"{_q}|{_st}"
+        _kw = {}
+        if _sens:
+            _kw["sensitivity"] = _sens
+            if _sens not in ("public", "internal"):
+                # 工单 id 由**正文 slug** 而来，明文写进文件名、_index.json 与
+                # _audit.jsonl——密级高于 internal 时改用不可逆身份：正文不再
+                # 进文件名与索引。身份里带密级，private 与 restricted 的同一段
+                # 话不会落到同一张工单上互相覆写正文；同一密级同一主题仍得同一
+                # id（H11⑦「同题同单」不变）。
+                _topic = "h" + hashlib.sha1(
+                    ("%s|%s" % (_sens, _topic)).encode("utf-8")).hexdigest()[:16]
         question = (f"为何 {_q} 出现 {_st}"
                     f" 而期望 {try_data.get('expected_state','?')}？")
         clues = try_data.get("missing", "")
@@ -5392,7 +5412,9 @@ class MdCG:
                                   context=" | ".join(parts),
                                   # ⑦ 身份文本：只取「主题｜实际态」——问题模板措辞、
                                   # reason、missing、现场数值一变就不再是新工单。
-                                  topic=f"{_q}|{_st}")
+                                  # （密级高于 internal 时 _topic 已换成不可逆身份，
+                                  # 见上方 issue #294 段。）
+                                  topic=_topic, **_kw)
         return {"unresolved_id": nid, "question": question}
 
     # ---------- 访问计数：append-only，检索路径不写节点文件 ----------

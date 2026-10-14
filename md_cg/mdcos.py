@@ -5115,7 +5115,7 @@ class MdCGOS(MdCG):
                           non_applicable_conditions=None, tags=None,
                           exclude=None, limit=consistency.MAX_SCAN,
                           depth=consistency.MAX_DEPTH, auto_flywheel=False,
-                          log_write=True):
+                          log_write=True, sensitivity=None):
         """不落盘地预检一条待写内容是否与既有节点/纪律冲突（三级决策）。
 
         log_write（路线 C，2026-10-05，透传 consistency.check 同名参数）：
@@ -5140,7 +5140,10 @@ class MdCGOS(MdCG):
                                        if not _is_null_condition(x)],
             tags=tags,
             exclude=exclude, limit=limit, depth=depth,
-            auto_flywheel=auto_flywheel, log_write=log_write)
+            auto_flywheel=auto_flywheel, log_write=log_write,
+            # issue #294：密级必须一路透传到飞轮——它决定工单的落盘密级与
+            # 身份（id）算法，缺了这条，private 正文会以 internal 明文建单。
+            sensitivity=sensitivity)
 
 # 生效条件：当 limit 传入时，以 limit（默认 100）调用 consistency.history 并返回其结果；本函数不改变 limit；
     def consistency_history(self, limit=100):
