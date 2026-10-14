@@ -31,7 +31,9 @@ import os
 import sys
 import time
 
+from . import crypto as _crypto
 from . import identity as _identity
+from . import security as _sec
 from . import signer as _signer
 from .datapath import aux_root
 from .fsutil import publish
@@ -54,6 +56,11 @@ SOURCE_PREFIX = "source:"
 
 MAX_ITEMS = 500              # 单包条目上限（防灌包）
 MAX_TEXT = 4000              # 单条正文上限
+
+# ---- issue #258：密级面的**单一权威**（不另立判据，直接引既有常量） ----
+_SENSITIVITY_ORDER = _sec.SENSITIVITY_ORDER
+_ENCRYPTED_LEVELS = set(_crypto.ENCRYPTED_LEVELS)
+_AccessDenied = _sec.AccessDenied
 
 # ---- issue #147（2026-10-11）：pack_id 白名单 ----
 # 病象：pack_id 未清洗即拼进归档路径（见 write_pack 缺省分支）⇒ 路径穿越；
@@ -247,6 +254,25 @@ def _pack_payload(pack: dict) -> bytes:
 
 
 # 生效条件：当传入 cg、subjects、since 时，遍历 cg.index["nodes"] 中按 node_id 排序的节点，仅收集标签含常量 TAG_OBS、不含 TAG_ANCHOR/TAG_TRAIT、不含 TAG_XNODE、能提取 subject: 标签且该 subject 在 subjects（subjects 为真时）或不限制（subjects 假值时）、且若 since 为真且 ts 为真则要求 float(ts) >= float(since) 的节点，返回含 node_id、subject、text（截断 MAX_TEXT）、kind、role、layer、过滤后的 tags、importance、verification_basis、ts 的列表。
+# ---- issue #258（2026-10-14）：跨节点证据包通路丢密级 ----
+# 病象：`_collect` 产出的条目**不带 sensitivity**，`import_pack` 又经
+# `identity.observe`（签名无该形参）落盘 ⇒ 走 `MdCGSecure.add` 的缺省
+# `DEFAULT_SENSITIVITY="internal"`。而 `crypto.ENCRYPTED_LEVELS =
+# ("private","secret")` ⇒ 发送方盘上是密文、接收方盘上是**明文**，且
+# `import_pack` 默认 `archive=True` 把整包明文 JSON 再落一份到收件箱。
+# 实测：A 侧 private（盘上无明文）→ B 侧 internal（盘上明文）+ 收件箱明文。
+#
+# 收口三处：① 本条读数进包；② 导入侧 fail-closed 校验（缺字段/非字符串/
+# 未知档一律不收，不降级）；③ 包内含加密档 ⇒ 不归档（归档是明文 JSON）。
+def _node_sensitivity(cg, nid):
+    """读节点密级。**与 #164 同源**（`subgraph.node_sensitivity`），不另立判据。"""
+    from . import subgraph as _sg
+    try:
+        return _sg.node_sensitivity(cg, nid)
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def _collect(cg, subjects=None, since=None) -> list:
     """收集本根**本地原始**观测证据（排除档案节点与已导入的跨节点证据）。"""
     want = set(subjects or [])
@@ -288,6 +314,8 @@ def _collect(cg, subjects=None, since=None) -> list:
             "importance": fm.get("importance"),
             "verification_basis": (e.get("verification_basis")
                                    or fm.get("verification_basis")),
+            # issue #258：密级随条目出根（此前整条通路不带该字段）
+            "sensitivity": _node_sensitivity(cg, nid),
             "ts": ts,
         })
     return items
@@ -431,6 +459,24 @@ def _xnode_id(from_node: str, orig: str) -> str:
 
 
 # 生效条件：当传入 pack、reason、swarm、**kw 时，构建含 at、reason、from_node、pack_id 及 kw 中非 None 项的拒绝记录，尝试追加到 inbox_dir(swarm)/_rejected.jsonl（OSError 忽略），返回 {"ok": False, "rejected": True, "reason": reason, "from_node": ...} 并合并 kw 中非 None 项。
+def _item_sensitivity(it: dict):
+    """校验包内条目的密级 → (密级, 拒收理由)。**fail-closed**。
+
+    issue #258：缺字段/非字符串/未知档一律返回理由（调用方跳过，不写盘）。
+    旧格式包（无 sensitivity）因此一律拒收——有意的行为变更。
+    """
+    raw = it.get("sensitivity")
+    if raw is None:
+        return None, "条目缺 sensitivity 字段（旧格式包一律拒收）"
+    if not isinstance(raw, str):
+        return None, "条目 sensitivity 非字符串：%r" % (raw,)
+    s = raw.strip().lower()
+    if s not in _SENSITIVITY_ORDER:
+        return None, "条目 sensitivity 未知档：%r（合法档 %s）" % (
+            raw, "/".join(_SENSITIVITY_ORDER))
+    return s, ""
+
+
 def _note_reject(pack: dict, reason: str, swarm: str = None, **kw) -> dict:
     rec = {"at": time.time(), "reason": reason,
            "from_node": (pack or {}).get("from_node"),
@@ -480,14 +526,27 @@ def import_pack(cg, src, *, subsystem: str = SUBSYSTEM, swarm: str = None,
 
     items = pack["items"][:MAX_ITEMS]
     written, skipped = [], 0
+    #: issue #258：拒收理由留痕（此前降级**不可见**——返回体只说 imported: N）
+    reasons = []
     for it in items:
         if not isinstance(it, dict):
             skipped += 1
+            reasons.append("条目非字典")
             continue
         subj = (it.get("subject") or "").strip()
         text = (it.get("text") or "").strip()
         if not subj or not text:
             skipped += 1
+            reasons.append("条目缺 subject/text")
+            continue
+        # issue #258：密级 fail-closed。缺字段/非字符串/未知档一律**不写盘**，
+        # 绝不回落到 DEFAULT_SENSITIVITY（那正是本件的病象）。旧格式包（无
+        # sensitivity）因此一律不收——**有意的行为变更**，与「跨节点证据没有
+        # 签名就不可溯源，宁可不产出」同口径。
+        sens, why = _item_sensitivity(it)
+        if why:
+            skipped += 1
+            reasons.append(why)
             continue
         tags = [TAG_XNODE, f"{SOURCE_PREFIX}{from_node}"]
         tags += [t for t in (it.get("tags") or [])
@@ -496,31 +555,53 @@ def import_pack(cg, src, *, subsystem: str = SUBSYSTEM, swarm: str = None,
                  and not t.startswith(SOURCE_PREFIX)
                  and t not in (TAG_XNODE, _identity.TAG_ANCHOR, _identity.TAG_TRAIT)]
         imp = it.get("importance")
-        _identity.observe(
-            cg, subj, text,
-            kind=it.get("kind"), role=it.get("role"),
-            layer=it.get("layer") or "knowledge",
-            tags=tags,
-            importance=0.5 if imp is None else imp,
-            verification_basis=it.get("verification_basis") or "data",
-            node_id=_xnode_id(from_node, it.get("node_id") or subj),
-            override=True)
+        try:
+            _identity.observe(
+                cg, subj, text,
+                kind=it.get("kind"), role=it.get("role"),
+                layer=it.get("layer") or "knowledge",
+                tags=tags,
+                importance=0.5 if imp is None else imp,
+                verification_basis=it.get("verification_basis") or "data",
+                node_id=_xnode_id(from_node, it.get("node_id") or subj),
+                sensitivity=sens,
+                override=True)
+        except _AccessDenied:
+            # issue #258：导入方密级不足 ⇒ **跳过，不降级落盘**（此前会落到
+            # 缺省 internal，等于把对端的 private 洗成 internal）。
+            skipped += 1
+            reasons.append("本节点密级不足（sensitivity=%s）" % sens)
+            continue
         written.append(_xnode_id(from_node, it.get("node_id") or subj))
 
     archived = ""
+    archive_skipped = ""
     if archive:
-        try:
-            archived = write_pack(pack, swarm=swarm)["file"]
-        except (OSError, EvidenceError):
-            # issue #147：归档越界（EvidenceError，realpath 兜底）与写盘失败
-            # 同等处理——**不逃逸**。修前只捕 OSError：pack_id 带空字节时
-            # open()/realpath 抛的 ValueError 会**逸出 import_pack**（实测），
-            # 调用方只见崩溃且无留痕；现一并收口。
-            archived = ""
+        # issue #258：归档是**明文 JSON**，包内含加密档（private/secret）时
+        # 再落一份到收件箱等于绕过 ENCRYPTED_LEVELS ⇒ 不归档并给出理由。
+        sealed = sorted({it.get("sensitivity") for it in items
+                         if isinstance(it, dict)
+                         and str(it.get("sensitivity") or "").strip().lower()
+                         in _ENCRYPTED_LEVELS})
+        if sealed:
+            archive_skipped = ("包内含加密档 %s：归档为明文 JSON，"
+                               "跳过以免绕过落盘加密" % "、".join(sealed))
+        else:
+            try:
+                archived = write_pack(pack, swarm=swarm)["file"]
+            except (OSError, EvidenceError):
+                # issue #147：归档越界（EvidenceError，realpath 兜底）与写盘
+                # 失败同等处理——**不逃逸**。修前只捕 OSError：pack_id 带空
+                # 字节时 open()/realpath 抛的 ValueError 会**逸出
+                # import_pack**（实测），调用方只见崩溃且无留痕；现一并收口。
+                archived = ""
     return {"ok": True, "from_node": from_node, "pack_id": pack.get("pack_id"),
             "imported": len(written), "skipped": skipped,
             "truncated": len(pack["items"]) > MAX_ITEMS,
-            "node_ids": written, "archived": archived}
+            "node_ids": written, "archived": archived,
+            # issue #258：拒收理由（封顶 20 条，防灌包刷屏）+ 归档跳过理由
+            "skipped_reasons": reasons[:20],
+            "archive_skipped": archive_skipped}
 
 
 # --------------------------------------------------------------------------
